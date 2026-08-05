@@ -1,0 +1,43 @@
+# Fly.io alternative to render.yaml. Same image, same environment contract.
+#
+#   fly launch --no-deploy --copy-config
+#   fly secrets set DATABASE_URL='jdbc:postgresql://...?sslmode=require' \
+#                   DATABASE_USERNAME='...' DATABASE_PASSWORD='...'
+#   fly deploy
+#
+# Secrets are set with `fly secrets`, never in this file.
+
+app = "settlement-service"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  MOCK_FAILURE_RATE = "0.4"
+  DRAIN_TICK_ENABLED = "true"
+  DRAIN_TICK_INTERVAL = "2s"
+  SETTLEMENT_MAX_ATTEMPTS = "10"
+  DB_POOL_MAX = "10"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Kept warm: an outbox drainer that is asleep is an outbox that is not
+  # draining, and a cold start in the middle of a settlement retry is exactly
+  # the crash the lease reaper exists to clean up after.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "45s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/readyz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

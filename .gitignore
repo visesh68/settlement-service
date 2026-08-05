@@ -1,0 +1,23 @@
+target/
+build/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# Secrets. .env.example is committed; .env never is.
+.env
+.env.*
+!.env.example
+
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+
+*.log
+.DS_Store
+Thumbs.db

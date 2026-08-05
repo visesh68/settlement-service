@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (real PostgreSQL, clean checkout)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      # No service container and no Docker: the suite starts a real PostgreSQL
+      # itself, which is what makes "green from a clean checkout" true on any
+      # machine rather than only on one with a daemon running.
+      - name: mvn verify
+        run: mvn -B verify
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          if-no-files-found: ignore
+
+  image:
+    name: Docker image builds and starts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: settlement-service:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Proves the compose stack actually comes up and serves traffic, rather
+      # than only that the image builds.
+      - name: Start the stack and run both correctness gates
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/readyz >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/readyz
+          ./scripts/gate1-concurrent-capture.sh http://localhost:8080 20
+          ./scripts/gate2-exactly-once-settlement.sh http://localhost:8080 25 0.4
+
+      - name: Show app logs on failure
+        if: failure()
+        run: docker compose logs app --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

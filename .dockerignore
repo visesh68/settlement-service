@@ -1,0 +1,23 @@
+# Keep the build context small and keep local state out of the image.
+target/
+.git/
+.gitignore
+.idea/
+*.iml
+.vscode/
+.mvn/
+mvnw
+mvnw.cmd
+
+# Never let local secrets into a build context.
+.env
+.env.*
+!.env.example
+
+# Docs and scripts are not needed to build the app.
+*.md
+scripts/
+docs/
+render.yaml
+fly.toml
+docker-compose.yml

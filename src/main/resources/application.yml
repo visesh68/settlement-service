@@ -1,0 +1,115 @@
+########################################################################
+# 12-factor config: every value below is overridable by environment.
+# Nothing sensitive has a real default committed here.
+########################################################################
+
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: settlement-service
+  main:
+    banner-mode: off
+  threads:
+    virtual:
+      enabled: true          # blocking JDBC + a sleepy downstream: virtual threads keep this cheap
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/settlement}
+    username: ${DATABASE_USERNAME:settlement}
+    password: ${DATABASE_PASSWORD:settlement}
+    hikari:
+      # The capture path serializes on a per-payment row lock while holding a
+      # connection, so the pool must comfortably exceed expected capture
+      # concurrency or requests queue on the pool instead of the lock.
+      maximum-pool-size: ${DB_POOL_MAX:24}
+      minimum-idle: ${DB_POOL_MIN:2}
+      connection-timeout: 10000
+      max-lifetime: 900000
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      # Money is integer minor units. An amount of 12.34 is a caller error and
+      # must be rejected, never quietly truncated to 12.
+      accept-float-as-int: false
+
+app:
+  # Identifies this instance in logs and in outbox lease ownership.
+  instance-id: ${INSTANCE_ID:}
+  settlement:
+    # The drainer talks to the downstream over real HTTP, so timeouts and
+    # retries are exercised for real. Points at this app's own /mock-settlement
+    # by default; override to aim at a different provider.
+    # {port} is substituted with the port actually bound at startup, which is
+    # what makes this correct on hosts that assign the port dynamically.
+    downstream-url: ${SETTLEMENT_DOWNSTREAM_URL:http://127.0.0.1:{port}/mock-settlement}
+    request-timeout: ${SETTLEMENT_REQUEST_TIMEOUT:3s}
+    # With a downstream that fails ~40% of the time, 10 attempts leaves a
+    # ~1-in-10,000 chance of an item dead-lettering purely from bad luck, which
+    # keeps the dead-letter queue meaningful: an item in it is a real problem,
+    # not statistical noise.
+    max-attempts: ${SETTLEMENT_MAX_ATTEMPTS:10}
+    backoff-base: ${SETTLEMENT_BACKOFF_BASE:250ms}
+    backoff-max: ${SETTLEMENT_BACKOFF_MAX:10s}
+    # How long a claimed item stays leased before the reaper assumes the owner
+    # died. Must exceed request-timeout by a healthy margin.
+    lease-duration: ${SETTLEMENT_LEASE_DURATION:30s}
+    batch-size: ${SETTLEMENT_BATCH_SIZE:50}
+    # Concurrent in-flight settlement calls within one drain pass.
+    concurrency: ${SETTLEMENT_CONCURRENCY:16}
+  drain:
+    # The self-driving tick. /admin/drain triggers the same code path.
+    enabled: ${DRAIN_TICK_ENABLED:true}
+    interval: ${DRAIN_TICK_INTERVAL:2s}
+  mock-downstream:
+    failure-rate: ${MOCK_FAILURE_RATE:0.4}
+    min-latency: ${MOCK_MIN_LATENCY:100ms}
+    max-latency: ${MOCK_MAX_LATENCY:500ms}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # p99 must be a real quantile computed from a histogram, not something
+      # extrapolated from a mean, or it will lie exactly when it matters.
+      percentiles-histogram:
+        http.server.requests: true
+      percentiles:
+        http.server.requests: 0.5, 0.95, 0.99
+      slo:
+        http.server.requests: 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s
+  observations:
+    key-values:
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+logging:
+  level:
+    root: ${LOG_LEVEL_ROOT:INFO}
+    com.settlement: ${LOG_LEVEL_APP:INFO}
+    org.springframework.jdbc.core: ${LOG_LEVEL_SQL:INFO}

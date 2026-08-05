@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settlement Service — admin</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e9ef;
+      --muted: #98a2b3; --accent: #6ea8fe; --ok: #4ade80; --warn: #fbbf24;
+      --bad: #f87171; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --text:#12141a; --muted:#5b6472; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, sans-serif; }
+    header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+    h1 { font-size:16px; margin:0; font-weight:600; }
+    header .sub { color:var(--muted); font-size:12px; }
+    main { padding:20px 24px; display:grid; gap:18px; max-width:1200px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+    .panel h2 { margin:0 0 12px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:600; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    label { color:var(--muted); font-size:12px; }
+    input, button, select {
+      font:inherit; background:var(--bg); color:var(--text);
+      border:1px solid var(--line); border-radius:6px; padding:7px 10px;
+    }
+    input { width:120px; }
+    button { cursor:pointer; border-color:var(--accent); color:var(--accent); background:transparent; }
+    button:hover { background:color-mix(in srgb, var(--accent) 14%, transparent); }
+    button.primary { background:var(--accent); color:#0b0d12; border-color:var(--accent); font-weight:600; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    table { width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12px; }
+    th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+    th { color:var(--muted); font-weight:500; font-family:system-ui, sans-serif; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+    .scroll { overflow-x:auto; }
+    .pill { padding:2px 8px; border-radius:99px; font-size:11px; border:1px solid currentColor; }
+    .AUTHORIZED, .PENDING { color:var(--warn); }
+    .CAPTURED, .SETTLED { color:var(--ok); }
+    .FAILED, .DEAD_LETTER { color:var(--bad); }
+    .IN_FLIGHT { color:var(--accent); }
+    .NONE { color:var(--muted); }
+    .stats { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px,1fr)); gap:10px; }
+    .stat { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+    .stat .k { color:var(--muted); font-size:11px; }
+    .stat .v { font-size:20px; font-family:var(--mono); margin-top:2px; }
+    #log { font-family:var(--mono); font-size:12px; white-space:pre-wrap; max-height:220px; overflow:auto;
+           background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; margin-top:10px; }
+    .ok { color:var(--ok); } .bad { color:var(--bad); } .muted { color:var(--muted); }
+    a { color:var(--accent); }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Settlement Service</h1>
+  <span class="sub">authorize → capture → outbox → settle exactly once</span>
+  <span class="sub" style="margin-left:auto">
+    <a href="/metrics">/metrics</a> · <a href="/healthz">/healthz</a> · <a href="/readyz">/readyz</a> ·
+    <a href="/admin/stats">/admin/stats</a> · <a href="/admin/dead-letters">dead letters</a>
+  </span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Invariants</h2>
+    <div class="stats" id="stats"></div>
+    <div style="margin-top:12px" class="row">
+      <span id="verdict" class="muted">loading…</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Actions</h2>
+    <div class="row">
+      <label>amount (paise) <input id="amount" type="number" value="125000" min="1"></label>
+      <label>currency <input id="currency" value="INR" style="width:70px"></label>
+      <button class="primary" id="btn-authorize">Authorize</button>
+      <span style="width:16px"></span>
+      <label>batch <input id="batch" type="number" value="20" min="1" max="200" style="width:70px"></label>
+      <button id="btn-batch">Authorize + capture batch</button>
+      <span style="width:16px"></span>
+      <label>passes <input id="passes" type="number" value="5" min="1" max="50" style="width:70px"></label>
+      <button id="btn-drain">Drain now</button>
+      <span style="width:16px"></span>
+      <label>fault rate <input id="rate" type="number" value="0.4" step="0.1" min="0" max="1" style="width:70px"></label>
+      <button id="btn-rate">Set</button>
+    </div>
+    <div id="log"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Payments</h2>
+    <div class="row" style="margin-bottom:10px">
+      <button id="btn-refresh">Refresh</button>
+      <label><input type="checkbox" id="auto" checked style="width:auto"> auto-refresh (2s)</label>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+        <tr><th>id</th><th>amount</th><th>state</th><th>settlement</th><th>attempts</th>
+          <th>settled at</th><th>last error</th><th></th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+  const $ = s => document.querySelector(s);
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID()
+    : 'k-' + Date.now() + '-' + Math.random().toString(16).slice(2));
+
+  function log(msg, cls = '') {
+    const el = $('#log');
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+    el.prepend(line);
+    while (el.childElementCount > 200) el.lastElementChild.remove();
+  }
+
+  async function api(method, path, body) {
+    const res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON body */ }
+    return { status: res.status, body: json, raw: text, replay: res.headers.get('Idempotent-Replay') };
+  }
+
+  async function authorize(amount, currency) {
+    const r = await api('POST', '/payments', {
+      amount: Number(amount), currency, idempotency_key: uuid()
+    });
+    if (r.status === 201) log(`authorized ${r.body.id} (${amount} ${currency})`, 'ok');
+    else log(`authorize → ${r.status} ${r.raw}`, 'bad');
+    return r.body;
+  }
+
+  async function capture(id) {
+    const r = await api('POST', `/payments/${id}/capture`, { idempotency_key: uuid() });
+    if (r.status === 200) log(`captured ${id}${r.replay === 'true' ? ' (replay)' : ''}`, 'ok');
+    else log(`capture ${id} → ${r.status} ${r.body ? r.body.message : r.raw}`, 'bad');
+    return r;
+  }
+
+  $('#btn-authorize').onclick = async () => {
+    const p = await authorize($('#amount').value, $('#currency').value.trim().toUpperCase());
+    if (p) await refresh();
+  };
+
+  $('#btn-batch').onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      const n = Math.max(1, Math.min(200, Number($('#batch').value)));
+      const amount = Number($('#amount').value), currency = $('#currency').value.trim().toUpperCase();
+      log(`authorizing + capturing ${n} payments…`);
+      const created = await Promise.all(
+        Array.from({ length: n }, () => api('POST', '/payments',
+          { amount, currency, idempotency_key: uuid() }).then(r => r.body)));
+      await Promise.all(created.filter(Boolean).map(p =>
+        api('POST', `/payments/${p.id}/capture`, { idempotency_key: uuid() })));
+      log(`batch of ${n} authorized and captured`, 'ok');
+      await refresh();
+    } finally { e.target.disabled = false; }
+  };
+
+  $('#btn-drain').onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      const passes = Math.max(1, Math.min(50, Number($('#passes').value)));
+      const r = await api('POST', `/admin/drain?passes=${passes}`);
+      const d = r.body || {};
+      log(`drain: claimed=${d.claimed} settled=${d.settled} retried=${d.retried} `
+        + `dead_lettered=${d.dead_lettered} reclaimed=${d.reclaimed} (${d.duration_ms}ms)`);
+      await refresh();
+    } finally { e.target.disabled = false; }
+  };
+
+  $('#btn-rate').onclick = async () => {
+    const r = await api('POST', '/admin/mock-settlement/config',
+      { failure_rate: Number($('#rate').value) });
+    log(`downstream fault rate → ${r.body.failure_rate}`);
+  };
+
+  $('#btn-refresh').onclick = () => refresh();
+
+  function pill(v) { return `<span class="pill ${v}">${v}</span>`; }
+
+  function statTile(k, v, cls = '') {
+    return `<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
+  }
+
+  async function refresh() {
+    const [stats, payments] = await Promise.all([
+      api('GET', '/admin/stats').then(r => r.body),
+      api('GET', '/payments?limit=50').then(r => r.body)
+    ]);
+
+    if (stats) {
+      const i = stats.invariants, d = stats.downstream;
+      $('#stats').innerHTML =
+        statTile('captured', i.captured_payments) +
+        statTile('settled', i.settled_outbox_rows, 'ok') +
+        statTile('outstanding', i.still_outstanding, i.still_outstanding ? 'muted' : 'ok') +
+        statTile('dead-lettered', i.dead_lettered, i.dead_lettered ? 'bad' : '') +
+        statTile('settlement keys', d.distinct_settlement_keys) +
+        statTile('deliveries', d.total_deliveries) +
+        statTile('deduped retries', d.redundant_deliveries) +
+        statTile('double-settled', i.double_settled_payments, i.double_settled_payments ? 'bad' : 'ok');
+
+      $('#verdict').innerHTML = i.safety_holds
+        ? `<span class="ok">safety holds</span> — no payment settled twice, `
+          + `every capture has exactly one settlement job`
+          + (i.converged ? ` · <span class="ok">converged</span>` : ` · <span class="muted">draining…</span>`)
+        : `<span class="bad">SAFETY VIOLATED</span> — inspect /admin/stats`;
+    }
+
+    if (payments) {
+      $('#rows').innerHTML = payments.map(p => `
+        <tr>
+          <td title="${p.id}">${p.id.slice(0, 8)}</td>
+          <td>${p.amount} ${p.currency}</td>
+          <td>${pill(p.state)}</td>
+          <td>${pill(p.settlement_state)}</td>
+          <td>${p.attempts}</td>
+          <td class="muted">${p.timings && p.timings.settled_at ? new Date(p.timings.settled_at).toLocaleTimeString() : '—'}</td>
+          <td class="muted" title="${p.last_error || ''}">${p.last_error ? p.last_error.slice(0, 44) : '—'}</td>
+          <td>${p.state === 'AUTHORIZED' ? `<button data-capture="${p.id}">capture</button>` : ''}</td>
+        </tr>`).join('');
+      $('#rows').querySelectorAll('[data-capture]').forEach(b => {
+        b.onclick = async () => { await capture(b.dataset.capture); await refresh(); };
+      });
+    }
+  }
+
+  setInterval(() => { if ($('#auto').checked) refresh(); }, 2000);
+  refresh();
+</script>
+</body>
+</html>

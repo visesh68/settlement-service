@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structured logging.
+
+  Production (default): one JSON object per line on stdout, which is what the
+  hosted log backend ingests. Every line carries the MDC, which always holds a
+  correlation_id — for HTTP requests it comes from the inbound header or is
+  minted by CorrelationIdFilter; for settlement work it is the correlation id
+  captured on the outbox row at capture time, so settlement retries and
+  dead-letters correlate back to the request that created them.
+
+  Local dev / tests get human-readable output via src/test/resources/logback-test.xml.
+
+  Nothing sensitive is logged: no idempotency key values, no credentials, no
+  request bodies. Only ids, states, counts and timings.
+-->
+<configuration>
+  <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="settlement-service"/>
+
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <timeZone>UTC</timeZone>
+      <fieldNames>
+        <timestamp>ts</timestamp>
+        <version>[ignore]</version>
+        <levelValue>[ignore]</levelValue>
+        <thread>thread</thread>
+        <logger>logger</logger>
+        <message>msg</message>
+      </fieldNames>
+      <customFields>{"service":"${appName}"}</customFields>
+      <includeContext>false</includeContext>
+      <includeMdcKeyName>correlation_id</includeMdcKeyName>
+      <includeMdcKeyName>instance_id</includeMdcKeyName>
+      <includeMdcKeyName>payment_id</includeMdcKeyName>
+      <includeMdcKeyName>settlement_key</includeMdcKeyName>
+      <includeMdcKeyName>outbox_id</includeMdcKeyName>
+      <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+        <maxDepthPerThrowable>25</maxDepthPerThrowable>
+        <maxLength>4096</maxLength>
+        <rootCauseFirst>true</rootCauseFirst>
+      </throwableConverter>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+</configuration>

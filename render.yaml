@@ -1,0 +1,40 @@
+# Render blueprint. Deploys the Docker image built from ./Dockerfile - not a
+# buildpack - so what runs in production is the same artifact as `docker compose up`.
+#
+# Setup:
+#   1. Create a free Postgres at neon.tech and copy its connection string.
+#   2. In Render: New > Blueprint, point at this repository.
+#   3. Set the DATABASE_* environment variables in the dashboard (they are
+#      marked sync:false below, so Render prompts for them and never stores
+#      them in git).
+services:
+  - type: web
+    name: settlement-service
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    healthCheckPath: /readyz
+    autoDeploy: true
+    envVars:
+      # Secrets: prompted for in the dashboard, never committed.
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_USERNAME
+        sync: false
+      - key: DATABASE_PASSWORD
+        sync: false
+
+      - key: MOCK_FAILURE_RATE
+        value: "0.4"
+      - key: DRAIN_TICK_ENABLED
+        value: "true"
+      - key: DRAIN_TICK_INTERVAL
+        value: "2s"
+      - key: SETTLEMENT_MAX_ATTEMPTS
+        value: "10"
+      # Render's free tier gives one instance; a single small pool is plenty and
+      # keeps well inside a free Postgres connection limit.
+      - key: DB_POOL_MAX
+        value: "10"
+      # Render injects PORT itself; the app reads it.

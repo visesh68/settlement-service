@@ -1,0 +1,228 @@
+# Settlement Service
+
+Payment capture and settlement with **idempotent authorize/capture**, **effectively-once
+settlement** against a downstream that fails ~40% of the time, and **crash-safe,
+resumable** draining. Java 21 · Spring Boot · PostgreSQL.
+
+> Design reasoning — the locking strategy, the alternatives rejected, the failure modes —
+> is in **[WRITEUP.md](WRITEUP.md)**. This file is how to run it.
+
+```
+authorize ──▶ AUTHORIZED ──capture──▶ CAPTURED ──▶ outbox ──drain──▶ SETTLED
+                   │                     (same transaction)   │
+                   └──void──▶ FAILED                           └──▶ DEAD_LETTER
+```
+
+---
+
+## Run it
+
+### Docker (app + database, one command)
+
+```bash
+docker compose up --build
+# http://localhost:8080
+```
+
+### Locally
+
+Needs a PostgreSQL and JDK 21.
+
+```bash
+export DATABASE_URL=jdbc:postgresql://localhost:5432/settlement
+export DATABASE_USERNAME=settlement
+export DATABASE_PASSWORD=...
+mvn spring-boot:run
+```
+
+Flyway migrates on startup. Configuration is entirely environment-driven —
+see [`.env.example`](.env.example) for every variable.
+
+### Tests
+
+```bash
+mvn verify
+```
+
+55 tests, green from a clean checkout, **no Docker required**: the suite downloads and
+runs a real PostgreSQL as a child process (Zonky embedded). Set `TEST_DATABASE_URL`
+(plus `TEST_DATABASE_USERNAME` / `TEST_DATABASE_PASSWORD`) to run against an external
+PostgreSQL instead.
+
+---
+
+## The two correctness gates
+
+One command each, against any running instance.
+
+```bash
+# Gate 1 — idempotent capture under concurrency
+./scripts/gate1-concurrent-capture.sh https://your-app.example.com 20
+
+# Gate 2 — exactly-once settlement against the flaky downstream
+./scripts/gate2-exactly-once-settlement.sh https://your-app.example.com 25 0.4
+```
+
+On Windows:
+
+```powershell
+.\scripts\gates.ps1 -BaseUrl https://your-app.example.com          # both gates
+.\scripts\gates.ps1 -BaseUrl http://localhost:8080 -Gate 1 -Concurrency 20
+.\scripts\gates.ps1 -BaseUrl http://localhost:8080 -Gate 2 -Batch 25 -FaultRate 0.4
+```
+
+**Gate 1** fires 20 concurrent captures at one payment twice — once sharing an
+idempotency key, once with distinct keys — and asserts the payment is captured exactly
+once with zero 5xx in both cases.
+
+**Gate 2** captures a batch, then drains repeatedly *and concurrently* while the
+downstream fails ~40% of calls, and asserts every payment is settled exactly once, none
+twice, none lost.
+
+Everything either gate asserts is also available in one request:
+
+```bash
+curl -s https://your-app.example.com/admin/stats | jq .invariants
+```
+
+```jsonc
+{
+  "captured_payments": 27,
+  "double_settled_payments": 0,       // must always be 0
+  "captured_without_outbox_row": 0,   // must always be 0
+  "settled_but_not_captured": 0,      // must always be 0
+  "safety_holds": true,               // true at every instant, mid-drain and mid-crash
+  "fully_drained": true,              // liveness: nothing outstanding
+  "converged": true,
+  "dead_lettered": 0
+}
+```
+
+`safety_holds` is the invariant that must never be false, even mid-drain.
+`fully_drained` is liveness and is legitimately false while work is in progress.
+
+---
+
+## API
+
+| method | path | notes |
+|---|---|---|
+| `POST` | `/payments` | `{ amount, currency, idempotency_key }` → 201. Same key + same body → the original 201. Same key + different body → **409**. Zero/negative/fractional amounts and unknown currencies → 400. |
+| `POST` | `/payments/{id}/capture` | `{ idempotency_key }` → 200, and enqueues settlement in the same transaction. Already captured / voided / key reused → **409**. Unknown payment → 404. |
+| `POST` | `/payments/{id}/void` | Moves an uncaptured authorization to terminal `FAILED`. |
+| `GET` | `/payments/{id}` | `{ state, settlement_state, attempts, settlement_key, last_error, timings }` |
+| `GET` | `/payments?limit=50` | Recent payments (backs the admin page). |
+| `POST` | `/admin/drain?passes=3` | Drain now. Safe to call concurrently with itself and with the background tick. |
+| `GET` | `/admin/stats` | Counts and invariants (above). |
+| `GET` | `/admin/dead-letters` | Terminal failures — visible, never silently dropped. |
+| `POST` | `/admin/mock-settlement/config` | `{ "failure_rate": 0.0 }` — pin the downstream's fault rate at runtime. |
+| `POST` | `/mock-settlement` | The simulated provider. Sleeps 100–500 ms, fails ~40%, idempotent on the settlement key. |
+| `GET` | `/healthz` | Liveness. Checks nothing external, by design. |
+| `GET` | `/readyz` | Readiness, including the datastore. |
+| `GET` | `/metrics` | Prometheus exposition. |
+| `GET` | `/` | Minimal admin page. |
+
+Responses carry `X-Correlation-Id` (echoed from the request, or minted) and
+`Idempotent-Replay: true|false`.
+
+### Quick tour
+
+```bash
+BASE=http://localhost:8080
+
+ID=$(curl -sS -X POST $BASE/payments -H 'Content-Type: application/json' \
+  -d '{"amount":125000,"currency":"INR","idempotency_key":"demo-1"}' | jq -r .id)
+
+curl -sS -X POST $BASE/payments/$ID/capture -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"demo-cap-1"}' | jq .
+
+curl -sS -X POST "$BASE/admin/drain?passes=5" | jq .
+curl -sS $BASE/payments/$ID | jq '{state, settlement_state, attempts, timings}'
+```
+
+The drain tick runs every 2 s on its own, so the explicit drain is only for
+watching it happen.
+
+---
+
+## Deploying
+
+The image is deployed, not a buildpack. Any host that runs a container works; two
+blueprints are included.
+
+### Render + Neon
+
+1. **Neon** → create a free project, copy the connection string, convert to JDBC:
+   `jdbc:postgresql://ep-xxx.region.aws.neon.tech/neondb?sslmode=require`
+2. **Render** → New → Blueprint → point at this repository. [`render.yaml`](render.yaml)
+   deploys the Dockerfile and health-checks `/readyz`.
+3. Set `DATABASE_URL`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` in the dashboard. They are
+   `sync: false`, so they are prompted for and never committed.
+
+> Render's free web service sleeps after ~15 minutes idle, and a sleeping instance is not
+> draining its outbox. Nothing is lost — the outbox is durable and the next request wakes
+> it — but for a background drainer, **Koyeb** (no sleep) or **Fly.io** with
+> `min_machines_running = 1` is a better free home. [`fly.toml`](fly.toml) is included.
+
+### Fly.io
+
+```bash
+fly launch --no-deploy --copy-config
+fly secrets set DATABASE_URL='jdbc:postgresql://...?sslmode=require' \
+                DATABASE_USERNAME='...' DATABASE_PASSWORD='...'
+fly deploy
+```
+
+### Shipping logs
+
+Logs are JSON on stdout, so any hosted backend ingests them without an agent config:
+
+- **Better Stack** — add a source, drop the token into the host's log-drain setting.
+- **Grafana Cloud (Loki)** — free tier; on Fly, `fly logs` can be forwarded with the
+  `fly-log-shipper` app.
+- **Axiom** — free tier, similar drain setup.
+
+Then share a read-only/public dashboard link. Correlated queries worth saving:
+
+```
+{app="settlement-service"} | json | event = "settlement_retry_scheduled"
+{app="settlement-service"} | json | event = "settlement_dead_lettered"
+{app="settlement-service"} | json | correlation_id = "<id from a capture response>"
+```
+
+The last one is the useful one: it returns the capture *and* every settlement attempt,
+retry and dead-letter that came from it, because the correlation id is stored on the
+outbox row rather than living only in the request thread.
+
+### Metrics
+
+`/metrics` is a standard Prometheus endpoint — point Grafana Cloud's scraper or a Fly
+metrics config at it. p99 latency is `histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket[5m])) by (le))`;
+buckets are exported rather than pre-computed quantiles so that aggregation across
+instances is correct.
+
+---
+
+## Scaling
+
+```bash
+docker compose up --scale app=3
+```
+
+No configuration change. Instances partition the outbox between themselves via
+`FOR UPDATE SKIP LOCKED`, and a lease plus a reaper means an instance that dies mid-drain
+has its work picked up by the others. See [WRITEUP.md](WRITEUP.md#scaling-and-failover).
+
+## Layout
+
+```
+src/main/java/com/settlement/
+  service/PaymentService.java       authorize + capture, the locking strategy
+  service/SettlementDrainer.java    claim, deliver, retry, dead-letter, reclaim
+  service/MockSettlementService.java the flaky, idempotent downstream
+  repo/OutboxRepository.java        the SQL that does the real work
+  web/                              controllers, correlation-id filter
+src/main/resources/db/migration/    Flyway schema
+src/test/java/com/settlement/       55 tests, real PostgreSQL
+scripts/                            the two correctness gates (bash + PowerShell)
+```

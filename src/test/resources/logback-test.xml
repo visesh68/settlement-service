@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tests get human-readable logs. Production emits JSON (see logback-spring.xml);
+  reading a failing test's output should not require a JSON parser.
+-->
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level [%X{correlation_id:-—}] %logger{30} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="com.settlement" level="INFO"/>
+  <logger name="org.springframework" level="WARN"/>
+  <logger name="org.flywaydb" level="WARN"/>
+  <logger name="com.zaxxer.hikari" level="WARN"/>
+  <logger name="io.zonky" level="WARN"/>
+
+  <root level="WARN">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>

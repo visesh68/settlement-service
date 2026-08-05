@@ -1,0 +1,55 @@
+# One command brings up the whole thing:
+#
+#     docker compose up --build
+#
+# Then open http://localhost:8080
+#
+# Secrets come from the environment, with development-only fallbacks that are
+# obviously development-only. Nothing here is reused in a deployed environment.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-settlement}
+      POSTGRES_USER: ${POSTGRES_USER:-settlement}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready, not a TCP probe: the port is open well before the server
+      # will accept queries, and starting the app early just means a crash loop.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-settlement} -d ${POSTGRES_DB:-settlement}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    # Not published by default: nothing outside the compose network needs it.
+    # Uncomment to inspect the database with a local client.
+    # ports:
+    #   - "5432:5432"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      DATABASE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-settlement}
+      DATABASE_USERNAME: ${POSTGRES_USER:-settlement}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only}
+      # The simulated provider's fault rate. The exercise asks for ~40%.
+      MOCK_FAILURE_RATE: ${MOCK_FAILURE_RATE:-0.4}
+      DRAIN_TICK_INTERVAL: ${DRAIN_TICK_INTERVAL:-2s}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  # Scale the drainer by scaling the app: `docker compose up --scale app=3`.
+  # No configuration change is needed, because FOR UPDATE SKIP LOCKED means
+  # instances partition the outbox between themselves without coordinating.
+
+volumes:
+  pgdata:
