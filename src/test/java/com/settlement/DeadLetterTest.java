@@ -28,7 +28,9 @@ class DeadLetterTest extends IntegrationTest {
         setFailureRate(1.0);
         UUID paymentId = authorizeAndCapture();
 
-        drainUntilQuiet(40);
+        assertThat(drainUntilQuiet(40))
+                .as("the outbox must reach a terminal state before we assert on what that state is")
+                .isTrue();
 
         assertThat(settlementStatus(paymentId)).isEqualTo("DEAD_LETTER");
         assertThat(jdbc.queryForObject(
@@ -49,7 +51,9 @@ class DeadLetterTest extends IntegrationTest {
     void deadLettersAreVisible() {
         setFailureRate(1.0);
         UUID paymentId = authorizeAndCapture();
-        drainUntilQuiet(40);
+        assertThat(drainUntilQuiet(40))
+                .as("the outbox must reach a terminal state before we assert on what that state is")
+                .isTrue();
 
         JsonNode deadLetters = body(get("/admin/dead-letters"));
         assertThat(deadLetters).hasSize(1);
@@ -73,7 +77,9 @@ class DeadLetterTest extends IntegrationTest {
     void deadLetteredItemsAreNotReclaimed() {
         setFailureRate(1.0);
         UUID paymentId = authorizeAndCapture();
-        drainUntilQuiet(40);
+        assertThat(drainUntilQuiet(40))
+                .as("the outbox must reach a terminal state before we assert on what that state is")
+                .isTrue();
         assertThat(settlementStatus(paymentId)).isEqualTo("DEAD_LETTER");
 
         long deliveriesBefore = count("SELECT count(*) FROM mock_settlements");

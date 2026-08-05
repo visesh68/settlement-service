@@ -82,14 +82,16 @@ class ExactlyOnceSettlementTest extends IntegrationTest {
         // give each pass a disjoint set of rows; if it did not, the same
         // settlement key would be delivered by two drainers at once and the
         // provider's ledger would be the place it showed up.
-        for (int round = 0; round < 25; round++) {
+        boolean drained = false;
+        for (int round = 0; round < 40 && !drained; round++) {
             inParallel(4, () -> drain(2));
-            if (stats().get("invariants").get("fully_drained").asBoolean()) {
-                break;
-            }
+            drained = stats().get("invariants").get("fully_drained").asBoolean();
         }
 
         JsonNode invariants = stats().get("invariants");
+        assertThat(drained)
+                .as("the batch must reach quiescence before 'settled exactly once' means anything")
+                .isTrue();
         assertThat(invariants.get("double_settled_payments").asLong())
                 .as("no payment may be settled twice, however many drainers run")
                 .isZero();

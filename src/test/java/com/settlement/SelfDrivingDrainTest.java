@@ -8,6 +8,7 @@ import com.settlement.support.IntegrationTest;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.TestPropertySource;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,6 +22,15 @@ import static org.assertj.core.api.Assertions.assertThat;
         "app.drain.enabled=true",
         "app.drain.interval=200ms"
 })
+// This is the only context in the suite with a live background drainer, and
+// Spring caches contexts for the whole run rather than closing them after the
+// class. Without this, the tick keeps firing against the shared database while
+// *later* test classes run, claiming and settling their outbox rows: dead-letter
+// tests find nothing dead-lettered, and the crash test finds its work already
+// drained. That failure is invisible locally, because it only bites when this
+// class happens to run before the others, which depends on the filesystem
+// ordering Surefire sees - so it passed on Windows and failed on Linux CI.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class SelfDrivingDrainTest extends IntegrationTest {
 
     @Test

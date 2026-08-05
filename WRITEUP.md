@@ -230,6 +230,21 @@ histogram buckets, not `quantile=` samples, so an assertion written from memory 
 false. The Dockerfile's `ENTRYPOINT` was likewise corrected after inspecting what
 `jarmode=tools` actually emits, rather than what it was assumed to emit.
 
+The most instructive one only appeared in CI. The suite was green on the machine it was
+written on and failed on Linux, with three unrelated-looking assertions failing. The cause
+was that `SelfDrivingDrainTest` is the one context with a live background drainer, and
+Spring caches test contexts for the whole run rather than closing them per class — so its
+tick kept firing against the shared database while *later* classes ran, claiming and
+settling their outbox rows. Dead-letter tests found nothing dead-lettered; the crash test
+found its work already drained. Whether it bit at all depended on the filesystem ordering
+Surefire happened to see, which differs by platform. The fix is one `@DirtiesContext`, but
+the point is that "passes on my machine" was not evidence of anything: it was confirmed by
+reproducing the failure locally with `-Dsurefire.runOrder=reversealphabetical`, then
+re-running the suite green under three different orderings. Two of the other tests were
+also changed to assert that the outbox reached quiescence *before* asserting on what state
+it reached, so a liveness problem now reports as one instead of masquerading as a
+correctness failure.
+
 **Where I would let AI act autonomously in a real payments flow:** writing tests,
 migrations reviewed before they run, dashboards, log/metric plumbing, and non-mutating
 diagnostics. **Where I would not:** anything that moves money or changes its state without
