@@ -4,6 +4,21 @@ Payment capture and settlement with **idempotent authorize/capture**, **effectiv
 settlement** against a downstream that fails ~40% of the time, and **crash-safe,
 resumable** draining. Java 21 · Spring Boot · PostgreSQL.
 
+| | |
+|---|---|
+| **Live app** | https://settlement-service-jyol.onrender.com |
+| **Invariants, one request** | https://settlement-service-jyol.onrender.com/admin/stats |
+| **Metrics** | https://settlement-service-jyol.onrender.com/metrics |
+| **Dead letters** | https://settlement-service-jyol.onrender.com/admin/dead-letters |
+| **CI** | [GitHub Actions](../../actions) — suite + image + both gates against the container |
+
+Deployed as a Docker image on Render (Singapore), backed by Neon PostgreSQL, with logs
+streamed to Better Stack.
+
+> Render's free tier sleeps after ~15 minutes idle. The first request then takes ~50s while
+> the instance wakes. Nothing is lost — the outbox is durable and draining resumes on the
+> next tick — but the first call may be slow.
+
 > Design reasoning — the locking strategy, the alternatives rejected, the failure modes —
 > is in **[WRITEUP.md](WRITEUP.md)**. This file is how to run it.
 

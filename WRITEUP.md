@@ -181,16 +181,28 @@ correct on a host that assigns the port.
 probe that fails during a database outage turns a recoverable incident into a crash loop.
 `/readyz` checks the datastore, because without it the instance should leave rotation.
 
-**Logs.** One JSON object per line on stdout. Every line carries a `correlation_id`, taken
-from an inbound `X-Correlation-Id` or minted. Critically, the capture's correlation id is
-**persisted onto the outbox row**, so a settlement retry or dead-letter logged minutes
-later on a background thread still carries the id of the request that created the work:
+**Logs.** One JSON object per line on stdout, forwarded by Render's log stream to Better
+Stack, which parses every field into something queryable without any parsing config —
+that is the practical reason for structured logs rather than a stylistic one.
 
-```json
-{"ts":"…","msg":"event=settlement_retry_scheduled attempt=2 of 10 downstream_status=500 backoff_ms=265 …",
- "level":"WARN","correlation_id":"gate2-capture-25","payment_id":"6d0e5623…","settlement_key":"0ae20116…",
- "outbox_id":"54","instance_id":"534fe389"}
+Every line carries a `correlation_id`, taken from an inbound `X-Correlation-Id` or minted.
+Critically, the capture's correlation id is **persisted onto the outbox row**, so a
+settlement retry or dead-letter logged minutes later, on a background thread, in a
+different drain pass, still carries the id of the request that created the work. Searching
+one correlation id on the live deployment returns the whole causal chain:
+
 ```
+event=settlement_attempt attempt=10 of 10
+    correlation_id=deadletter-demo settlement_key=e68b9a23… outbox_id=50
+event=mock_settlement_failed reason=injected_fault
+    correlation_id=deadletter-demo settlement_key=e68b9a23…
+event=settlement_dead_lettered attempts=10 of 10 downstream_status=500        [ERROR]
+    correlation_id=deadletter-demo payment_id=db94d258… outbox_id=50
+```
+
+This is the difference between logs you can grep and logs you can actually investigate an
+incident with: "why did this payment not settle" is one query, not a manual join across
+timestamps.
 
 Logged events: `payment_authorized`, `payment_captured`, `capture_rejected`,
 `capture_race_lost`, `authorize_race_lost`, `idempotent_replay`, `idempotency_key_reused`,
@@ -198,6 +210,11 @@ Logged events: `payment_authorized`, `payment_captured`, `capture_rejected`,
 `settlement_dead_lettered`, `settlement_lease_reclaimed`, `settlement_lease_lost`,
 `mock_settlement_deduplicated`, `drain_completed`. Amounts and ids are logged; idempotency
 key *values*, request bodies and credentials never are.
+
+Render's *metrics* stream is a paid feature, so metrics are not pushed to a hosted backend
+on the free tier. `/metrics` is publicly scrapable instead, which satisfies the
+"via `/metrics` and/or a dashboard" requirement; pointing a Grafana Cloud agent at it is a
+configuration change, not a code one.
 
 **Metrics** at `/metrics` (Prometheus): `payments_authorized_total`, `payments_captured_total`,
 `payments_capture_race_lost_total`, `idempotency_replay_total{scope}`,
