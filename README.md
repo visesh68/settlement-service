@@ -30,6 +30,146 @@ authorize ──▶ AUTHORIZED ──capture──▶ CAPTURED ──▶ outbox 
 
 ---
 
+## Demo
+
+![Admin console: authorize, capture, settle, then the metrics dashboard](docs/media/admin-portal.gif)
+
+Naming a settlement, authorizing it, capturing it, watching the drainer settle it against
+a downstream that fails 40% of the time — then the metrics dashboard, which reads
+`/metrics` directly in the browser. `double-settled` stays at 0 throughout; that is the
+whole point.
+
+---
+
+## Architecture
+
+> Editable source: [`docs/diagrams/hld.excalidraw`](docs/diagrams/hld.excalidraw) — drop it
+> into [excalidraw.com](https://excalidraw.com) to change or re-export it.
+
+```mermaid
+flowchart LR
+  C["Clients<br/>admin UI · Postman · curl"]
+
+  subgraph SVC["Settlement Service — Java 21 · Spring Boot 3 · Docker"]
+    direction TB
+    API["PaymentController<br/>authorize · capture · void"]
+    PS["PaymentService<br/>idempotency · row locks"]
+    OB["OutboxRepository<br/>SKIP LOCKED · leases"]
+    DR["SettlementDrainer<br/>claim · retry · dead-letter"]
+    MOCK["MockSettlementController<br/>simulated PSP<br/>~40% 500s · 100–500ms"]
+    OBS["metrics · admin/stats<br/>healthz · readyz"]
+  end
+
+  DB[("Neon PostgreSQL<br/>payments · idempotency_records<br/>settlement_outbox · mock_settlements")]
+  OBSV["Grafana Cloud · Loki<br/>Better Stack"]
+
+  C -->|HTTP| API
+  API --> PS
+  PS --> OB
+  OB --> DR
+  PS -->|JDBC| DB
+  OB -->|JDBC| DB
+  DR -->|real HTTP| MOCK
+  MOCK -->|its own ledger| DB
+  OBS -.->|scrape / push| OBSV
+```
+
+Three things in that picture are deliberate:
+
+- **The drainer reaches the provider over real HTTP**, not an in-process call — so timeouts,
+  connection failures and 5xx are exercised for real rather than simulated.
+- **The provider keeps its own table.** `mock_settlements` is conceptually on the far side of
+  a network. The correctness gate asks *it* whether anything settled twice, so a bug in our
+  bookkeeping cannot make the numbers look good.
+- **The drainer is a scheduled tick, not a request thread.** Killing the process mid-drain
+  loses nothing; the outbox is durable and a lease reaper picks the work back up.
+
+---
+
+## How it works
+
+> Editable source: [`docs/diagrams/lld.excalidraw`](docs/diagrams/lld.excalidraw)
+
+```mermaid
+flowchart LR
+  subgraph TX["ONE transaction — commits together or not at all"]
+    direction TB
+    T1["1 · SELECT … FOR UPDATE<br/>lock the payment row"]
+    T2["2 · key already seen?<br/>replay the stored response"]
+    T3["3 · state = AUTHORIZED?<br/>else 409"]
+    T4["4 · UPDATE … WHERE state = AUTHORIZED"]
+    T5["5 · INSERT settlement_outbox<br/>payment_id UNIQUE<br/>settlement_key minted once"]
+    T6["6 · INSERT idempotency_record<br/>scope + key PRIMARY KEY"]
+    T1 --> T2 --> T3 --> T4 --> T5 --> T6
+  end
+
+  subgraph DRAIN["Drain tick — separate transaction, every 2s"]
+    direction TB
+    D1["claim · FOR UPDATE SKIP LOCKED<br/>attempts+1 · lease 30s"]
+    D2["POST /mock-settlement<br/>Idempotency-Key: settlement_key"]
+    D3["2xx → SETTLED"]
+    D4["5xx / timeout → PENDING + backoff"]
+    D5["attempts exhausted → DEAD_LETTER"]
+    D6["reaper · lease expired → PENDING<br/>the crash path"]
+    D1 --> D2
+    D2 --> D3
+    D2 --> D4
+    D4 --> D5
+    D4 -.retry.-> D1
+    D6 -.recovers.-> D1
+  end
+
+  TX ==> DRAIN
+```
+
+**The settlement key is minted once, at capture, and never regenerated on retry.** That
+single fact is what makes every later redelivery safe.
+
+**The dangerous window** is when the provider committed and we died before writing
+`SETTLED`. The lease expires, the reaper requeues, and the *same* key is delivered again —
+so the provider dedupes it. Delivery happened twice; settlement happened once. That is the
+difference between at-least-once delivery and an exactly-once *effect*, and it is the thing
+this service exists to demonstrate.
+
+### The guards live in the database
+
+So a bug in application code still cannot double-settle:
+
+| Constraint | Guarantees |
+|---|---|
+| `payments.state` CHECK + `WHERE state='AUTHORIZED'` | one capture per payment |
+| `settlement_outbox.payment_id` UNIQUE | one settlement job per capture |
+| `settlement_outbox.settlement_key` UNIQUE | one dedupe key per job |
+| `mock_settlements.settlement_key` PRIMARY KEY | the provider physically cannot settle a key twice |
+| `idempotency_records (scope, key)` PRIMARY KEY | one stored answer per key |
+
+---
+
+## Technologies
+
+| | |
+|---|---|
+| **Language / runtime** | Java 21 — virtual threads, so blocking JDBC plus a sleepy downstream stays cheap |
+| **Framework** | Spring Boot 3.5 — web, JDBC, validation, actuator |
+| **Data access** | Spring `JdbcTemplate` — hand-written SQL, because the locking *is* the design |
+| **Database** | PostgreSQL 17 — `FOR UPDATE`, `FOR UPDATE SKIP LOCKED`, partial indexes, `RETURNING` |
+| **Migrations** | Flyway — runs on startup, so a deploy migrates itself |
+| **Connection pool** | HikariCP — sized above capture concurrency so requests queue on the row lock, not the pool |
+| **Metrics** | Micrometer → Prometheus (`/metrics`) and OTLP (push, for hosts with no scraper) |
+| **Logging** | Logback + `logstash-logback-encoder` (JSON to stdout), optional Loki appender |
+| **Testing** | JUnit 5, AssertJ, Awaitility, Zonky embedded PostgreSQL — real Postgres, no Docker needed |
+| **Build** | Maven, multi-stage Dockerfile |
+| **CI** | GitHub Actions — suite, image build, and both correctness gates against the container |
+| **Hosting** | Render (Docker, Singapore) + Neon PostgreSQL |
+| **Observability** | Grafana Cloud, Better Stack, plus a built-in dashboard at `/dashboard.html` |
+| **API collection** | Postman / newman — [`postman/`](postman/), 51 requests and 56 assertions |
+
+No ORM, no message broker, no Redis. The outbox is a table, the queue is `SKIP LOCKED`, and
+the idempotency store is a primary key. Everything that makes this correct is something
+PostgreSQL already does.
+
+---
+
 ## Run it
 
 ### Docker (app + database, one command)
@@ -59,7 +199,7 @@ see [`.env.example`](.env.example) for every variable.
 mvn verify
 ```
 
-55 tests, green from a clean checkout, **no Docker required**: the suite downloads and
+65 tests, green from a clean checkout, **no Docker required**: the suite downloads and
 runs a real PostgreSQL as a child process (Zonky embedded). Set `TEST_DATABASE_URL`
 (plus `TEST_DATABASE_USERNAME` / `TEST_DATABASE_PASSWORD`) to run against an external
 PostgreSQL instead.
@@ -291,8 +431,15 @@ src/main/java/com/settlement/
   service/SettlementDrainer.java    claim, deliver, retry, dead-letter, reclaim
   service/MockSettlementService.java the flaky, idempotent downstream
   repo/OutboxRepository.java        the SQL that does the real work
+  metrics/AppMetrics.java           throughput and latency
+  metrics/InvariantMetrics.java     the safety invariants, as alertable gauges
   web/                              controllers, correlation-id filter
-src/main/resources/db/migration/    Flyway schema
-src/test/java/com/settlement/       55 tests, real PostgreSQL
+src/main/resources/db/migration/    Flyway schema (V1 base, V2 settlement name)
+src/main/resources/static/          admin console + /dashboard.html metrics view
+src/test/java/com/settlement/       65 tests, real PostgreSQL
 scripts/                            the two correctness gates (bash + PowerShell)
+postman/                            51-request collection, 7 scenario folders
+grafana/                            dashboard JSON + Grafana Cloud setup
+docs/diagrams/                      HLD and LLD Excalidraw sources
+docs/media/                         admin console recording
 ```
