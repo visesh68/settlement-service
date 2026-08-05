@@ -35,6 +35,7 @@ public class MockSettlementController {
     public record MockSettlementRequest(
             @NotNull UUID settlementKey,
             @NotNull UUID paymentId,
+            String name,
             @NotNull @Positive Long amountMinor,
             String currency) {
     }
@@ -46,7 +47,7 @@ public class MockSettlementController {
             throw ApiException.invalid("settlement_key, payment_id and a positive amount_minor are required");
         }
 
-        return downstream.settle(request.settlementKey(), request.paymentId(),
+        return downstream.settle(request.settlementKey(), request.paymentId(), request.name(),
                         request.amountMinor(), request.currency() == null ? "INR" : request.currency())
                 .map(MockSettlementController::ok)
                 .orElseGet(MockSettlementController::injectedFailure);
@@ -57,6 +58,7 @@ public class MockSettlementController {
         body.put("status", "SETTLED");
         body.put("settlement_key", result.settlementKey());
         body.put("payment_id", result.paymentId());
+        body.put("name", result.name());
         body.put("provider_ref", result.providerRef());
         body.put("duplicate", result.duplicate());
         body.put("delivery_count", result.deliveryCount());

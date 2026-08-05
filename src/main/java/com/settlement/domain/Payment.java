@@ -5,6 +5,7 @@ import java.util.UUID;
 
 public record Payment(
         UUID id,
+        String name,
         long amountMinor,
         String currency,
         PaymentState state,

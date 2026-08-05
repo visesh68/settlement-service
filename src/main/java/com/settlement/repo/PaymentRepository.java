@@ -17,11 +17,11 @@ public class PaymentRepository {
         this.jdbc = jdbc;
     }
 
-    public void insertAuthorized(UUID id, long amountMinor, String currency, String correlationId) {
+    public void insertAuthorized(UUID id, String name, long amountMinor, String currency, String correlationId) {
         jdbc.update("""
-                INSERT INTO payments (id, amount_minor, currency, state, correlation_id)
-                VALUES (?, ?, ?, 'AUTHORIZED', ?)
-                """, id, amountMinor, currency, correlationId);
+                INSERT INTO payments (id, name, amount_minor, currency, state, correlation_id)
+                VALUES (?, ?, ?, ?, 'AUTHORIZED', ?)
+                """, id, name, amountMinor, currency, correlationId);
     }
 
     public Optional<Payment> findById(UUID id) {

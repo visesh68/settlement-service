@@ -50,6 +50,7 @@ public class SettlementClient {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("settlement_key", item.settlementKey().toString());
         body.put("payment_id", item.paymentId().toString());
+        body.put("name", item.name());
         body.put("amount_minor", item.amountMinor());
         body.put("currency", item.currency());
 

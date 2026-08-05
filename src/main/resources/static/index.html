@@ -74,6 +74,7 @@
   <section class="panel">
     <h2>Actions</h2>
     <div class="row">
+      <label>name <input id="name" value="" placeholder="optional label" maxlength="120" style="width:170px"></label>
       <label>amount (paise) <input id="amount" type="number" value="125000" min="1"></label>
       <label>currency <input id="currency" value="INR" style="width:70px"></label>
       <button class="primary" id="btn-authorize">Authorize</button>
@@ -99,7 +100,7 @@
     <div class="scroll">
       <table>
         <thead>
-        <tr><th>id</th><th>amount</th><th>state</th><th>settlement</th><th>attempts</th>
+        <tr><th>id</th><th>name</th><th>amount</th><th>state</th><th>settlement</th><th>attempts</th>
           <th>settled at</th><th>last error</th><th></th></tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -112,6 +113,11 @@
   const $ = s => document.querySelector(s);
   const uuid = () => (crypto.randomUUID ? crypto.randomUUID()
     : 'k-' + Date.now() + '-' + Math.random().toString(16).slice(2));
+
+  // Payment names are caller-supplied and the table below is built with
+  // innerHTML, so anything from the server is escaped before it is interpolated.
+  const esc = s => String(s).replace(/[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   function log(msg, cls = '') {
     const el = $('#log');
@@ -134,11 +140,11 @@
     return { status: res.status, body: json, raw: text, replay: res.headers.get('Idempotent-Replay') };
   }
 
-  async function authorize(amount, currency) {
+  async function authorize(amount, currency, name) {
     const r = await api('POST', '/payments', {
-      amount: Number(amount), currency, idempotency_key: uuid()
+      name: name || null, amount: Number(amount), currency, idempotency_key: uuid()
     });
-    if (r.status === 201) log(`authorized ${r.body.id} (${amount} ${currency})`, 'ok');
+    if (r.status === 201) log(`authorized ${r.body.id} (${name ? name + ', ' : ''}${amount} ${currency})`, 'ok');
     else log(`authorize → ${r.status} ${r.raw}`, 'bad');
     return r.body;
   }
@@ -151,7 +157,8 @@
   }
 
   $('#btn-authorize').onclick = async () => {
-    const p = await authorize($('#amount').value, $('#currency').value.trim().toUpperCase());
+    const p = await authorize($('#amount').value, $('#currency').value.trim().toUpperCase(),
+      $('#name').value.trim());
     if (p) await refresh();
   };
 
@@ -160,10 +167,14 @@
     try {
       const n = Math.max(1, Math.min(200, Number($('#batch').value)));
       const amount = Number($('#amount').value), currency = $('#currency').value.trim().toUpperCase();
+      const name = $('#name').value.trim();
       log(`authorizing + capturing ${n} payments…`);
+      // Suffix the batch index so a batch stays distinguishable in the table —
+      // the whole point of the name. Names are not unique, so this is cosmetic.
       const created = await Promise.all(
-        Array.from({ length: n }, () => api('POST', '/payments',
-          { amount, currency, idempotency_key: uuid() }).then(r => r.body)));
+        Array.from({ length: n }, (_, k) => api('POST', '/payments',
+          { name: name ? `${name} #${k + 1}` : null, amount, currency, idempotency_key: uuid() })
+          .then(r => r.body)));
       await Promise.all(created.filter(Boolean).map(p =>
         api('POST', `/payments/${p.id}/capture`, { idempotency_key: uuid() })));
       log(`batch of ${n} authorized and captured`, 'ok');
@@ -226,6 +237,7 @@
       $('#rows').innerHTML = payments.map(p => `
         <tr>
           <td title="${p.id}">${p.id.slice(0, 8)}</td>
+          <td title="${p.name ? esc(p.name) : ''}">${p.name ? esc(p.name.slice(0, 28)) : '<span class="muted">—</span>'}</td>
           <td>${p.amount} ${p.currency}</td>
           <td>${pill(p.state)}</td>
           <td>${pill(p.settlement_state)}</td>

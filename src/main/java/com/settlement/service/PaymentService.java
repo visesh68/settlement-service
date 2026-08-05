@@ -93,9 +93,22 @@ public class PaymentService {
 
     public Result authorize(AuthorizeRequest request, String correlationId) {
         String currency = normalizeCurrency(request.currency());
+        String name = normalizeName(request.name());
         long amount = request.amount();
         String key = request.idempotencyKey();
-        String fingerprint = fingerprint(SCOPE_AUTHORIZE, amount + "|" + currency);
+        // The name is part of the canonical request: replaying a key with a
+        // different label is a different request, and answers 409 like any other
+        // body change. Blank and absent normalize to the same thing above, so
+        // they hash identically and replay rather than conflict.
+        //
+        // A null name contributes NO segment at all, rather than an empty one.
+        // That keeps the canonical form byte-identical to the pre-name version,
+        // so idempotency records written before this column existed still replay
+        // after the deploy instead of turning into spurious 409s.
+        String canonical = name == null
+                ? amount + "|" + currency
+                : amount + "|" + currency + "|" + name;
+        String fingerprint = fingerprint(SCOPE_AUTHORIZE, canonical);
 
         // Fast path: this key has already been answered.
         Optional<IdempotencyRecord> seen = idempotency.find(SCOPE_AUTHORIZE, key);
@@ -106,7 +119,7 @@ public class PaymentService {
         UUID id = UUID.randomUUID();
         try {
             PaymentView view = tx.execute(status -> {
-                payments.insertAuthorized(id, amount, currency, correlationId);
+                payments.insertAuthorized(id, name, amount, currency, correlationId);
                 Payment payment = payments.findById(id).orElseThrow();
                 PaymentView v = PaymentView.of(payment, null);
                 // Committing the payment and the idempotency record together is
@@ -116,8 +129,8 @@ public class PaymentService {
                 return v;
             });
             metrics.authorized();
-            log.info("event=payment_authorized payment_id={} amount_minor={} currency={}",
-                    id, amount, currency);
+            log.info("event=payment_authorized payment_id={} name={} amount_minor={} currency={}",
+                    id, name, amount, currency);
             return new Result(201, view, false);
 
         } catch (DuplicateKeyException e) {
@@ -195,8 +208,8 @@ public class PaymentService {
                 }
 
                 UUID settlementKey = UUID.randomUUID();
-                outbox.enqueue(paymentId, settlementKey, payment.amountMinor(), payment.currency(),
-                        settlementMaxAttempts, correlationId);
+                outbox.enqueue(paymentId, settlementKey, payment.name(), payment.amountMinor(),
+                        payment.currency(), settlementMaxAttempts, correlationId);
 
                 Payment captured = payments.findById(paymentId).orElseThrow();
                 OutboxItem item = outbox.findByPaymentId(paymentId).orElseThrow();
@@ -277,6 +290,19 @@ public class PaymentService {
         log.info("event=idempotent_replay scope={} payment_id={} status={}",
                 scope, record.paymentId(), record.responseStatus());
         return new Result(record.responseStatus(), fromJson(record.responseBody()), true);
+    }
+
+    /**
+     * Blank and absent are the same thing: one representation of "no label"
+     * reaches the database, so the {@code name IS NULL OR length(name) >= 1}
+     * check never has to arbitrate and the fingerprint is stable.
+     */
+    private static String normalizeName(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private static String normalizeCurrency(String raw) {

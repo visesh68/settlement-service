@@ -15,6 +15,7 @@ import com.settlement.domain.Payment;
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record PaymentView(
         UUID id,
+        String name,
         long amount,
         String currency,
         String state,
@@ -30,6 +31,7 @@ public record PaymentView(
     public static PaymentView of(Payment payment, OutboxItem outbox) {
         return new PaymentView(
                 payment.id(),
+                payment.name(),
                 payment.amountMinor(),
                 payment.currency(),
                 payment.state().name(),

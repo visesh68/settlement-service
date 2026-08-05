@@ -55,14 +55,15 @@ public class MockSettlementService {
         this.failureRatePpm = new AtomicLong(Math.round(clamp(config.failureRate()) * 1_000_000L));
     }
 
-    public record SettlementResult(boolean settled, UUID settlementKey, UUID paymentId,
+    public record SettlementResult(boolean settled, UUID settlementKey, UUID paymentId, String name,
                                    String providerRef, boolean duplicate, int deliveryCount) {
     }
 
     /**
      * @return empty when the provider "fails" — the caller turns that into a 500.
      */
-    public Optional<SettlementResult> settle(UUID settlementKey, UUID paymentId, long amountMinor, String currency) {
+    public Optional<SettlementResult> settle(UUID settlementKey, UUID paymentId, String name,
+                                             long amountMinor, String currency) {
         sleepLikeANetworkCall();
 
         // Dedupe first: a key this provider has already settled always returns
@@ -73,8 +74,10 @@ public class MockSettlementService {
             MockSettlement existing = alreadySettled.get();
             log.info("event=mock_settlement_deduplicated settlement_key={} delivery_count={} provider_ref={}",
                     settlementKey, existing.deliveryCount(), existing.providerRef());
+            // The name echoed back is the one recorded at first settlement, not
+            // the one on this delivery: the original settlement is what stands.
             return Optional.of(new SettlementResult(true, settlementKey, existing.paymentId(),
-                    existing.providerRef(), true, existing.deliveryCount()));
+                    existing.name(), existing.providerRef(), true, existing.deliveryCount()));
         }
 
         if (rollFailure()) {
@@ -84,11 +87,12 @@ public class MockSettlementService {
 
         String providerRef = newProviderRef();
         Optional<MockSettlement> inserted =
-                repo.insertIfAbsent(settlementKey, paymentId, amountMinor, currency, providerRef);
+                repo.insertIfAbsent(settlementKey, paymentId, name, amountMinor, currency, providerRef);
 
         if (inserted.isPresent()) {
-            log.info("event=mock_settlement_recorded settlement_key={} provider_ref={}", settlementKey, providerRef);
-            return Optional.of(new SettlementResult(true, settlementKey, paymentId, providerRef, false, 1));
+            log.info("event=mock_settlement_recorded settlement_key={} name={} provider_ref={}",
+                    settlementKey, name, providerRef);
+            return Optional.of(new SettlementResult(true, settlementKey, paymentId, name, providerRef, false, 1));
         }
 
         // Lost an insert race with a concurrent delivery of the same key. The
@@ -100,7 +104,7 @@ public class MockSettlementService {
         log.info("event=mock_settlement_deduplicated settlement_key={} delivery_count={} reason=concurrent_insert",
                 settlementKey, winner.deliveryCount());
         return Optional.of(new SettlementResult(true, settlementKey, winner.paymentId(),
-                winner.providerRef(), true, winner.deliveryCount()));
+                winner.name(), winner.providerRef(), true, winner.deliveryCount()));
     }
 
     public double failureRate() {

@@ -19,6 +19,7 @@ final class RowMappers {
 
     static final RowMapper<Payment> PAYMENT = (rs, i) -> new Payment(
             rs.getObject("id", java.util.UUID.class),
+            rs.getString("name"),
             rs.getLong("amount_minor"),
             rs.getString("currency"),
             PaymentState.valueOf(rs.getString("state")),
@@ -33,6 +34,7 @@ final class RowMappers {
             rs.getLong("id"),
             rs.getObject("payment_id", java.util.UUID.class),
             rs.getObject("settlement_key", java.util.UUID.class),
+            rs.getString("name"),
             rs.getLong("amount_minor"),
             rs.getString("currency"),
             SettlementStatus.valueOf(rs.getString("status")),

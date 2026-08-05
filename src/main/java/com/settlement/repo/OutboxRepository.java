@@ -25,7 +25,7 @@ import org.springframework.stereotype.Repository;
 public class OutboxRepository {
 
     private static final String COLUMNS = """
-            id, payment_id, settlement_key, amount_minor, currency, status, attempts,
+            id, payment_id, settlement_key, name, amount_minor, currency, status, attempts,
             max_attempts, next_attempt_at, lease_owner, lease_expires_at, last_error,
             correlation_id, created_at, first_attempt_at, settled_at
             """;
@@ -44,14 +44,14 @@ public class OutboxRepository {
      * <p>The settlement key is minted here, once, and is never regenerated on
      * retry. That single fact is what makes every later redelivery safe.
      */
-    public void enqueue(UUID paymentId, UUID settlementKey, long amountMinor, String currency,
+    public void enqueue(UUID paymentId, UUID settlementKey, String name, long amountMinor, String currency,
                         int maxAttempts, String correlationId) {
         jdbc.update("""
                 INSERT INTO settlement_outbox
-                    (payment_id, settlement_key, amount_minor, currency, status,
+                    (payment_id, settlement_key, name, amount_minor, currency, status,
                      attempts, max_attempts, next_attempt_at, correlation_id)
-                VALUES (?, ?, ?, ?, 'PENDING', 0, ?, now(), ?)
-                """, paymentId, settlementKey, amountMinor, currency, maxAttempts, correlationId);
+                VALUES (?, ?, ?, ?, ?, 'PENDING', 0, ?, now(), ?)
+                """, paymentId, settlementKey, name, amountMinor, currency, maxAttempts, correlationId);
     }
 
     public Optional<OutboxItem> findByPaymentId(UUID paymentId) {
@@ -100,7 +100,7 @@ public class OutboxRepository {
                         LIMIT ?
                   ) due
                  WHERE o.id = due.id
-                RETURNING o.id, o.payment_id, o.settlement_key, o.amount_minor, o.currency,
+                RETURNING o.id, o.payment_id, o.settlement_key, o.name, o.amount_minor, o.currency,
                           o.status, o.attempts, o.max_attempts, o.next_attempt_at, o.lease_owner,
                           o.lease_expires_at, o.last_error, o.correlation_id, o.created_at,
                           o.first_attempt_at, o.settled_at
@@ -162,7 +162,7 @@ public class OutboxRepository {
                  WHERE o.status = 'IN_FLIGHT'
                    AND o.lease_expires_at < now()
                    AND o.attempts < o.max_attempts
-                RETURNING o.id, o.payment_id, o.settlement_key, o.amount_minor, o.currency,
+                RETURNING o.id, o.payment_id, o.settlement_key, o.name, o.amount_minor, o.currency,
                           o.status, o.attempts, o.max_attempts, o.next_attempt_at, o.lease_owner,
                           o.lease_expires_at, o.last_error, o.correlation_id, o.created_at,
                           o.first_attempt_at, o.settled_at
@@ -176,7 +176,7 @@ public class OutboxRepository {
                  WHERE o.status = 'IN_FLIGHT'
                    AND o.lease_expires_at < now()
                    AND o.attempts >= o.max_attempts
-                RETURNING o.id, o.payment_id, o.settlement_key, o.amount_minor, o.currency,
+                RETURNING o.id, o.payment_id, o.settlement_key, o.name, o.amount_minor, o.currency,
                           o.status, o.attempts, o.max_attempts, o.next_attempt_at, o.lease_owner,
                           o.lease_expires_at, o.last_error, o.correlation_id, o.created_at,
                           o.first_attempt_at, o.settled_at

@@ -7,6 +7,7 @@ public record OutboxItem(
         long id,
         UUID paymentId,
         UUID settlementKey,
+        String name,
         long amountMinor,
         String currency,
         SettlementStatus status,

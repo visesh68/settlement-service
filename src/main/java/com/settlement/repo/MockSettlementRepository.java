@@ -24,6 +24,7 @@ public class MockSettlementRepository {
     private static final RowMapper<MockSettlement> MAPPER = (rs, i) -> new MockSettlement(
             rs.getObject("settlement_key", UUID.class),
             rs.getObject("payment_id", UUID.class),
+            rs.getString("name"),
             rs.getLong("amount_minor"),
             rs.getString("currency"),
             rs.getString("provider_ref"),
@@ -46,7 +47,7 @@ public class MockSettlementRepository {
                 UPDATE mock_settlements
                    SET delivery_count = delivery_count + 1
                  WHERE settlement_key = ?
-                RETURNING settlement_key, payment_id, amount_minor, currency,
+                RETURNING settlement_key, payment_id, name, amount_minor, currency,
                           provider_ref, delivery_count, settled_at
                 """, MAPPER, settlementKey).stream().findFirst();
     }
@@ -55,22 +56,22 @@ public class MockSettlementRepository {
      * First successful settlement for this key wins. Returns empty when another
      * concurrent caller inserted first, so the loser can go and read that one.
      */
-    public Optional<MockSettlement> insertIfAbsent(UUID settlementKey, UUID paymentId,
+    public Optional<MockSettlement> insertIfAbsent(UUID settlementKey, UUID paymentId, String name,
                                                    long amountMinor, String currency, String providerRef) {
         return jdbc.query("""
                 INSERT INTO mock_settlements
-                    (settlement_key, payment_id, amount_minor, currency, provider_ref)
-                VALUES (?, ?, ?, ?, ?)
+                    (settlement_key, payment_id, name, amount_minor, currency, provider_ref)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (settlement_key) DO NOTHING
-                RETURNING settlement_key, payment_id, amount_minor, currency,
+                RETURNING settlement_key, payment_id, name, amount_minor, currency,
                           provider_ref, delivery_count, settled_at
-                """, MAPPER, settlementKey, paymentId, amountMinor, currency, providerRef)
+                """, MAPPER, settlementKey, paymentId, name, amountMinor, currency, providerRef)
                 .stream().findFirst();
     }
 
     public Optional<MockSettlement> find(UUID settlementKey) {
         return jdbc.query("""
-                SELECT settlement_key, payment_id, amount_minor, currency,
+                SELECT settlement_key, payment_id, name, amount_minor, currency,
                        provider_ref, delivery_count, settled_at
                   FROM mock_settlements WHERE settlement_key = ?
                 """, MAPPER, settlementKey).stream().findFirst();
@@ -113,6 +114,7 @@ public class MockSettlementRepository {
     public record MockSettlement(
             UUID settlementKey,
             UUID paymentId,
+            String name,
             long amountMinor,
             String currency,
             String providerRef,
