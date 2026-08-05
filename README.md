@@ -4,9 +4,18 @@ Payment capture and settlement with **idempotent authorize/capture**, **effectiv
 settlement** against a downstream that fails ~40% of the time, and **crash-safe,
 resumable** draining. Java 21 · Spring Boot · PostgreSQL.
 
+## Explanation video
+
+[![Settlement Service — a six-minute walkthrough of capture, the outbox, and the drain loop](docs/media/explanation-video-thumb.jpg)](https://vimeo.com/1215920236)
+
+**[Watch on Vimeo](https://vimeo.com/1215920236) — 6:11.** The capture transaction, the outbox
+handoff, and the drain loop settling against a downstream that fails 40% of the time. The
+frame above is the admin console mid-run: `double-settled 0`, and *safety holds — no payment
+settled twice*. That number staying at zero is the entire point of the service.
+
 | | |
 |---|---|
-| **Explanation video** | [walkthrough on Vimeo](https://vimeo.com/1215920236) — the design, end to end |
+| **Explanation video** | [walkthrough on Vimeo](https://vimeo.com/1215920236) — 6:11 |
 | **Live app** | https://settlement-service-jyol.onrender.com |
 | **Invariants, one request** | https://settlement-service-jyol.onrender.com/admin/stats |
 | **Metrics dashboard** | https://settlement-service-jyol.onrender.com/dashboard.html |
