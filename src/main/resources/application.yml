@@ -115,6 +115,30 @@ management:
       export:
         enabled: true
 
+  # Push the same registry to an OTLP endpoint. OFF unless OTLP_ENABLED=true, so
+  # nothing here changes behaviour until it is deliberately switched on — with
+  # it off there is no exporter thread and no outbound connection attempt.
+  #
+  # This exists because a platform that gives you a public URL but no inbound
+  # scraper cannot be pulled from. /metrics remains the source of truth; this
+  # ships the same numbers outward on a timer.
+  #
+  # For Grafana Cloud: OTLP_URL is the OTLP gateway for your stack's region with
+  # /v1/metrics on the end, and OTLP_AUTH is "Basic " + base64(instanceId:token).
+  # Both come from the OTLP integration page of your Grafana Cloud stack.
+  otlp:
+    metrics:
+      export:
+        enabled: ${OTLP_ENABLED:false}
+        url: ${OTLP_URL:http://localhost:4318/v1/metrics}
+        step: ${OTLP_STEP:60s}
+        headers:
+          Authorization: ${OTLP_AUTH:}
+        resource-attributes:
+          service.name: ${spring.application.name}
+          service.instance.id: ${INSTANCE_ID:local}
+          deployment.environment: ${DEPLOY_ENV:local}
+
 logging:
   level:
     root: ${LOG_LEVEL_ROOT:INFO}

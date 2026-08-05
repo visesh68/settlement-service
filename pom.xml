@@ -65,6 +65,18 @@
       <artifactId>micrometer-registry-prometheus</artifactId>
     </dependency>
 
+    <!--
+      Push metrics to an OTLP endpoint (Grafana Cloud, and anything else that
+      speaks OTLP). Disabled by default - see management.otlp in application.yml -
+      so this is inert until OTLP_ENABLED is set. It exists because a service on
+      a platform with no inbound scraper cannot be pulled from: /metrics stays
+      the source of truth, this just pushes the same registry outward.
+    -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-otlp</artifactId>
+    </dependency>
+
     <!-- Structured (JSON) logging -->
     <dependency>
       <groupId>net.logstash.logback</groupId>
