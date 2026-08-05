@@ -51,8 +51,7 @@ curl -sS -m 15 "$BASE_URL/readyz" >/dev/null || { printf '%sservice is not ready
 
 before=$(stats)
 captured_before=$(json_field "$before" captured_payments)
-keys_before=$(json_field "$before" distinct_settlement_keys)
-: "${captured_before:=0}" "${keys_before:=0}"
+: "${captured_before:=0}"
 
 # ---------------------------------------------------------------------------
 printf '%s1. pinning the downstream fault rate at %s%s\n' "$BOLD" "$FAULT_RATE" "$OFF"
@@ -121,11 +120,10 @@ check "nothing settled that was not captured"   "0"    "$phantom_settles"
 check "safety invariants hold"                  "true" "$safety"
 check "outbox fully drained"                    "true" "$drained"
 
-# settlement-key count == captured count, allowing for anything the batch found
-# already present and for items that legitimately dead-lettered.
+# settlement-key count == captured count, allowing for items that legitimately
+# dead-lettered.
 expected_keys=$((captured_total - dead_letters))
 check "settlement keys == captured − dead-lettered" "$expected_keys" "$keys_total"
-check "our batch's settlements landed" "$BATCH" "$((keys_total - keys_before))"
 
 if [ "${dead_letters:-0}" != "0" ]; then
   printf '  %sNOTE%s  %s item(s) dead-lettered — terminal, visible at %s/admin/dead-letters, never dropped\n' \
@@ -133,7 +131,29 @@ if [ "${dead_letters:-0}" != "0" ]; then
 fi
 printf '\n'
 
-printf '%s5. evidence the retry path was exercised%s\n' "$BOLD" "$OFF"
+# ---------------------------------------------------------------------------
+# Ask about THIS batch's payments by id, rather than inferring from a global
+# count. A delta over a shared instance is not trustworthy: work captured before
+# this script started may still have been settling when the "before" snapshot was
+# taken, which makes the arithmetic wrong without anything being wrong.
+printf '%s5. every payment in THIS batch, checked individually%s\n' "$BOLD" "$OFF"
+batch_settled=0
+batch_dead=0
+batch_unfinished=0
+for f in "$tmp"/*; do
+  [ -f "$f" ] || continue
+  payment_id=$(cat "$f")
+  case "$(json_field "$(curl -sS -m 30 "$BASE_URL/payments/$payment_id")" settlement_state)" in
+    SETTLED)     batch_settled=$((batch_settled + 1)) ;;
+    DEAD_LETTER) batch_dead=$((batch_dead + 1)) ;;
+    *)           batch_unfinished=$((batch_unfinished + 1)) ;;
+  esac
+done
+check "all reached a terminal settlement state" "$BATCH" "$((batch_settled + batch_dead))"
+check "none left unsettled"                     "0"      "$batch_unfinished"
+printf '   settled=%s  dead-lettered=%s  unfinished=%s\n\n' "$batch_settled" "$batch_dead" "$batch_unfinished"
+
+printf '%s6. evidence the retry path was exercised%s\n' "$BOLD" "$OFF"
 printf '   captured=%s  settled=%s  dead-lettered=%s  settlement keys=%s  deliveries seen by provider=%s\n' \
   "$captured_total" "$settled_rows" "$dead_letters" "$keys_total" "$deliveries"
 printf '   %sa ~%s failure rate over %s items means most items needed several attempts;%s\n' \

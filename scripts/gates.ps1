@@ -144,8 +144,6 @@ function Invoke-Gate2 {
   Write-Host "Gate 2 - exactly-once settlement under a flaky downstream" -ForegroundColor White
   Write-Host "target: $BaseUrl   batch: $Batch   downstream fault rate: $FaultRate" -ForegroundColor DarkGray
 
-  $keysBefore = (Get-Stats).downstream.distinct_settlement_keys
-
   Write-Head "1. pinning the downstream fault rate at $FaultRate"
   [void](Invoke-Api POST "/admin/mock-settlement/config" @{ failure_rate = $FaultRate })
 
@@ -185,14 +183,27 @@ function Invoke-Gate2 {
   Assert-Equal "outbox fully drained" $true $drained
   Assert-Equal "settlement keys == captured - dead-lettered" `
     ($inv.captured_payments - $inv.dead_lettered) $final.downstream.distinct_settlement_keys
-  Assert-Equal "our batch's settlements landed" $Batch `
-    ($final.downstream.distinct_settlement_keys - $keysBefore)
 
   if ($inv.dead_lettered -gt 0) {
     Write-Host "  NOTE  $($inv.dead_lettered) item(s) dead-lettered - terminal, visible at $BaseUrl/admin/dead-letters, never dropped" -ForegroundColor Yellow
   }
 
-  Write-Head "5. evidence the retry path was exercised"
+  # Ask about THIS batch's payments by id, rather than inferring from a global
+  # count. A delta over a shared instance is not trustworthy: work captured
+  # before this script started may still have been settling when the "before"
+  # snapshot was taken, which makes the arithmetic wrong without anything being
+  # actually wrong.
+  Write-Head "5. every payment in THIS batch, checked individually"
+  $states = $paymentIds | ForEach-Object { (Invoke-Api GET "/payments/$_").Body.settlement_state }
+  $batchSettled = @($states | Where-Object { $_ -eq "SETTLED" }).Count
+  $batchDead = @($states | Where-Object { $_ -eq "DEAD_LETTER" }).Count
+  $batchUnfinished = @($states | Where-Object { $_ -ne "SETTLED" -and $_ -ne "DEAD_LETTER" }).Count
+
+  Assert-Equal "all reached a terminal settlement state" $Batch ($batchSettled + $batchDead)
+  Assert-Equal "none left unsettled" 0 $batchUnfinished
+  Write-Host "   settled=$batchSettled  dead-lettered=$batchDead  unfinished=$batchUnfinished"
+
+  Write-Head "6. evidence the retry path was exercised"
   Write-Host ("   captured={0}  settled={1}  dead-lettered={2}  settlement keys={3}  deliveries seen by provider={4}" -f `
       $inv.captured_payments, $inv.settled_outbox_rows, $inv.dead_lettered,
       $final.downstream.distinct_settlement_keys, $final.downstream.total_deliveries)
