@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.settlement.domain.OutboxItem;
@@ -51,19 +52,35 @@ class CrashResumeTest extends IntegrationTest {
         ConfigurableApplicationContext doomed = startSecondInstance(Map.of(
                 "app.instance-id", "doomed-instance",
                 "app.settlement.lease-duration", "2s",
-                "app.mock-downstream.min-latency", "5s",
-                "app.mock-downstream.max-latency", "5s",
+                // Its settlement calls take 30s and it is willing to wait 60s for
+                // them, so the work is guaranteed to still be in flight when we
+                // kill it. Without the raised timeout the default 3s client
+                // timeout would fire first, and the instance would tidily
+                // reschedule its own work — testing a graceful failure rather
+                // than a crash.
+                "app.mock-downstream.min-latency", "30s",
+                "app.mock-downstream.max-latency", "30s",
+                "app.settlement.request-timeout", "60s",
                 "server.shutdown", "immediate"));
 
+        CompletableFuture<Void> doomedDrain = null;
         try {
             SettlementDrainerHandle drainer = new SettlementDrainerHandle(doomed);
-            CompletableFuture.runAsync(drainer::drain);
+            doomedDrain = CompletableFuture.runAsync(drainer::drain);
 
-            // Wait until the doomed instance has actually taken the work.
-            Awaitility.await().atMost(Duration.ofSeconds(20))
-                    .until(() -> count("SELECT count(*) FROM settlement_outbox WHERE status = 'IN_FLIGHT'") > 0);
-            assertThat(count("SELECT count(*) FROM settlement_outbox WHERE lease_owner = 'doomed-instance'"))
-                    .isEqualTo(paymentIds.size());
+            // Await the exact state we are about to assert on, rather than a
+            // proxy for it. Checking "something is IN_FLIGHT" and then asserting
+            // separately on who owns it is two reads of a moving target: if the
+            // doomed instance settles between them, the second read sees a
+            // released lease and the failure looks like a correctness bug rather
+            // than the race it is.
+            Awaitility.await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(50))
+                    .untilAsserted(() -> assertThat(count(
+                            "SELECT count(*) FROM settlement_outbox "
+                                    + "WHERE status = 'IN_FLIGHT' AND lease_owner = 'doomed-instance'"))
+                            .as("the doomed instance should be holding all %s items mid-flight",
+                                    paymentIds.size())
+                            .isEqualTo(paymentIds.size()));
 
             // Kill it. Abruptly, mid-HTTP-call.
             //
@@ -78,6 +95,18 @@ class CrashResumeTest extends IntegrationTest {
         } finally {
             if (doomed.isActive()) {
                 doomed.close();
+            }
+            // The dying instance's drain thread must be finished before this test
+            // returns. Left running, it outlives the test, wakes up after the next
+            // test has truncated the database, and writes into it — which is a
+            // genuinely confusing failure to debug, because it surfaces as a
+            // correctness assertion failing in an unrelated test.
+            if (doomedDrain != null) {
+                try {
+                    doomedDrain.get(60, TimeUnit.SECONDS);
+                } catch (Exception expected) {
+                    // It was killed mid-flight; failing is the whole point.
+                }
             }
         }
 
