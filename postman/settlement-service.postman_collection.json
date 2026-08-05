@@ -1,0 +1,1128 @@
+{
+  "info": {
+    "name": "Settlement Service",
+    "description": "Every endpoint the service exposes, plus ordered scenarios that demonstrate its guarantees.\n\n## Setup\n\nSet the `baseUrl` collection variable. Defaults to `http://localhost:8080`; point it at your Render URL to run against the deployment.\n\n## How to use\n\nFolders `01`–`04` are the raw API, one request per endpoint, for poking at things by hand.\n\nFolders `A`–`G` are **ordered scenarios**. Run each folder top-to-bottom with the Collection Runner (or click through in order) — later requests depend on variables set by earlier ones. Each has assertions, so a green run is a real proof, not just a 200.\n\n## Scenario E is the one that makes `deduped retries` move\n\nIt stays 0 in normal operation because a downstream 500 records nothing, so an ordinary retry-after-failure never produces a duplicate delivery. Scenario E redelivers a settlement key the provider has already settled, which is exactly what a crashed instance or a post-commit timeout would do. Watch `deduped retries` go up while `double-settled` stays 0 — that is the whole guarantee in one step.\n\nFor the same thing arising *organically* rather than by hand, restart the app with the request timeout squeezed under the provider's latency so post-commit ambiguity is routine:\n\n```\nMOCK_FAILURE_RATE=0.0\nMOCK_MIN_LATENCY=50ms\nMOCK_MAX_LATENCY=600ms\nSETTLEMENT_REQUEST_TIMEOUT=300ms\n```\n\nRoughly half the calls then time out *after* the provider committed, every retry dedupes, and the counter climbs on its own. Those three are read at startup, so they need a restart — unlike the fault rate, which is tunable at runtime.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "payment_id", "value": "" },
+    { "key": "settlement_key", "value": "" },
+    { "key": "amount", "value": "125000" },
+    { "key": "idem_key", "value": "" },
+    { "key": "deduped_before", "value": "0" }
+  ],
+  "item": [
+    {
+      "name": "01 · Health & Ops",
+      "item": [
+        {
+          "name": "GET /healthz — liveness",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/healthz", "host": ["{{baseUrl}}"], "path": ["healthz"] },
+            "description": "Deliberately checks nothing external. A liveness probe that fails on a database outage turns a recoverable incident into a crash loop."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /readyz — readiness",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/readyz", "host": ["{{baseUrl}}"], "path": ["readyz"] },
+            "description": "Checks the datastore. 503 when Postgres is unreachable, so the instance leaves rotation."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('datastore ok', () => pm.expect(pm.response.json().datastore).to.eql('ok'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /metrics — Prometheus exposition",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/metrics", "host": ["{{baseUrl}}"], "path": ["metrics"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 · Payments API",
+      "item": [
+        {
+          "name": "POST /payments — authorize",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Acme invoice #1041\",\n  \"amount\": 125000,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] },
+            "description": "`amount` is integer minor units (paise) — never a float. `name` is an optional label, max 120 chars, not unique, not an identifier. `idempotency_key` is required."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('payment_id', b.id);",
+                  "pm.test('AUTHORIZED', () => pm.expect(b.state).to.eql('AUTHORIZED'));",
+                  "pm.test('nothing queued before capture', () => pm.expect(b.settlement_state).to.eql('NONE'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /payments — authorize without a name",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 7500,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] },
+            "description": "The name is optional. Omitted stays null and renders as an em dash in the admin UI — nothing is invented."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('name is null, not a placeholder', () => pm.expect(pm.response.json().name).to.be.null);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /payments/{id}",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /payments — recent list",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/payments?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments"],
+              "query": [{ "key": "limit", "value": "50" }]
+            },
+            "description": "Backing list for the admin page. limit is clamped to 1–500."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /payments/{id}/capture",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"idempotency_key\": \"{{$guid}}\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            },
+            "description": "Captures exactly once and enqueues the settlement job in the same transaction. Only AUTHORIZED is capturable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "if (b.settlement_key) pm.collectionVariables.set('settlement_key', b.settlement_key);",
+                  "pm.test('CAPTURED', () => pm.expect(b.state).to.eql('CAPTURED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /payments/{id}/void",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/void",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "void"]
+            },
+            "description": "Moves an AUTHORIZED payment to the terminal FAILED state, so 'a failed payment cannot be captured' is a reachable path rather than a claim about an unreachable state."
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 · Admin API",
+      "item": [
+        {
+          "name": "GET /admin/stats — the correctness gate",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/stats", "host": ["{{baseUrl}}"], "path": ["admin", "stats"] },
+            "description": "One request that answers the whole gate. `invariants.safety_holds` is the pass/fail; the downstream counts are the supporting evidence."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const i = pm.response.json().invariants;",
+                  "pm.test('safety holds', () => pm.expect(i.safety_holds).to.be.true);",
+                  "pm.test('no payment settled twice', () => pm.expect(i.double_settled_payments).to.eql(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /admin/drain",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/admin/drain?passes=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "drain"],
+              "query": [
+                { "key": "passes", "value": "5" },
+                { "key": "batch_size", "value": "50", "disabled": true }
+              ]
+            },
+            "description": "Drains the outbox now; the background tick runs the same code path. Safe to call concurrently with itself — that is what FOR UPDATE SKIP LOCKED is for, and doing so is a legitimate way to check nothing settles twice."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /admin/dead-letters",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/admin/dead-letters?limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "dead-letters"],
+              "query": [{ "key": "limit", "value": "100" }]
+            },
+            "description": "Nothing is silently dropped: terminal failures are listed here for reconciliation."
+          }
+        },
+        {
+          "name": "GET /admin/mock-settlement/config",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/admin/mock-settlement/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "mock-settlement", "config"]
+            }
+          }
+        },
+        {
+          "name": "POST /admin/mock-settlement/config — pin fault rate",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"failure_rate\": 0.0\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/mock-settlement/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "mock-settlement", "config"]
+            },
+            "description": "0.0 proves convergence deterministically, 1.0 forces dead-lettering. Changed at runtime, no redeploy."
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 · Downstream (simulated provider)",
+      "item": [
+        {
+          "name": "POST /mock-settlement — settle a key",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"settlement_key\": \"{{settlement_key}}\",\n  \"payment_id\": \"{{payment_id}}\",\n  \"name\": \"Acme invoice #1041\",\n  \"amount_minor\": {{amount}},\n  \"currency\": \"INR\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/mock-settlement", "host": ["{{baseUrl}}"], "path": ["mock-settlement"] },
+            "description": "This is NOT your service — it is the simulated provider, reachable over real HTTP. It is idempotent on settlement_key (that column is its PRIMARY KEY), sleeps 100–500ms, and returns 500 at the configured fault rate. Its 500s mean 'not settled', so a retry is free to settle."
+          }
+        }
+      ]
+    },
+    {
+      "name": "A · Happy path — authorize → capture → settle",
+      "item": [
+        {
+          "name": "1. pin fault rate to 0.0",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"failure_rate\": 0.0 }" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/mock-settlement/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "mock-settlement", "config"]
+            }
+          }
+        },
+        {
+          "name": "2. authorize",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Happy path payout\",\n  \"amount\": 125000,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('payment_id', b.id);",
+                  "pm.collectionVariables.set('amount', b.amount);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. capture",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"idempotency_key\": \"{{$guid}}\" }" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('settlement_key', b.settlement_key);",
+                  "pm.test('CAPTURED', () => pm.expect(b.state).to.eql('CAPTURED'));",
+                  "pm.test('settlement key minted once', () => pm.expect(b.settlement_key).to.not.be.null);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. drain",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/admin/drain?passes=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "drain"],
+              "query": [{ "key": "passes", "value": "5" }]
+            }
+          }
+        },
+        {
+          "name": "5. verify settled",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.test('SETTLED', () => pm.expect(b.settlement_state).to.eql('SETTLED'));",
+                  "pm.test('settled_at is stamped', () => pm.expect(b.timings.settled_at).to.not.be.null);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "B · Idempotent authorize — same key, same body replays",
+      "item": [
+        {
+          "name": "1. authorize with a fixed key",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('idem_key', 'scenario-b-' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('not a replay', () => pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false'));",
+                  "pm.collectionVariables.set('payment_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 4200,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{idem_key}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          }
+        },
+        {
+          "name": "2. same key, same body → replays the original response",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 4200,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{idem_key}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] },
+            "description": "Returns the original 201 and the same bytes, with Idempotent-Replay: true. No second payment is created.\n\nThis nameless shape is also the regression guard for the deploy: records written before the `name` column existed must still replay, so a null name contributes no segment to the request fingerprint."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 again', () => pm.response.to.have.status(201));",
+                  "pm.test('flagged as a replay', () => pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('true'));",
+                  "pm.test('same payment, not a new one', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('payment_id')));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "C · Idempotency conflicts — same key, different body is 409",
+      "item": [
+        {
+          "name": "1. authorize with a fixed key",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('idem_key', 'scenario-c-' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('201 Created', () => pm.response.to.have.status(201));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"original label\",\n  \"amount\": 4200,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{idem_key}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          }
+        },
+        {
+          "name": "2. same key, different AMOUNT → 409",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"original label\",\n  \"amount\": 9900,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{idem_key}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('key reuse is named explicitly', () => pm.expect(pm.response.json().error).to.eql('idempotency_key_reused'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. same key, different CURRENCY → 409",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"original label\",\n  \"amount\": 4200,\n  \"currency\": \"USD\",\n  \"idempotency_key\": \"{{idem_key}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('409 Conflict', () => pm.response.to.have.status(409));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. same key, different NAME → 409",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"a different label\",\n  \"amount\": 4200,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{idem_key}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] },
+            "description": "The name is part of the canonical request, so changing only the label is still a different request. Everything else is byte-identical."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('name is part of request identity', () => pm.expect(pm.response.json().error).to.eql('idempotency_key_reused'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "D · State machine — double capture and void",
+      "item": [
+        {
+          "name": "1. authorize",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"State machine probe\",\n  \"amount\": 5000,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('payment_id', pm.response.json().id);"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. capture → 200",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"idempotency_key\": \"{{$guid}}\" }" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. capture again with a NEW key → 409 already captured",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"idempotency_key\": \"{{$guid}}\" }" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            },
+            "description": "A fresh key means this is not a replay — it is a genuine second capture attempt, and the database's WHERE state = 'AUTHORIZED' guard refuses it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('already captured', () => pm.expect(pm.response.json().error).to.eql('already_captured'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. authorize a second payment, then void it",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"To be voided\",\n  \"amount\": 6000,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('payment_id', pm.response.json().id);"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. void → FAILED",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/void",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "void"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('FAILED', () => pm.expect(pm.response.json().state).to.eql('FAILED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. capture a voided payment → 409",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"idempotency_key\": \"{{$guid}}\" }" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('invalid transition', () => pm.expect(pm.response.json().error).to.eql('invalid_state_transition'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "E · Deduped retries — provider idempotency in the open",
+      "item": [
+        {
+          "name": "1. pin fault rate to 0.0",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"failure_rate\": 0.0 }" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/mock-settlement/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "mock-settlement", "config"]
+            },
+            "description": "Isolate the effect. A 500 records nothing downstream, so ordinary retry-after-failure never produces a duplicate delivery — which is exactly why this counter normally sits at 0."
+          }
+        },
+        {
+          "name": "2. authorize",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Dedupe demo\",\n  \"amount\": 125000,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('payment_id', b.id);",
+                  "pm.collectionVariables.set('amount', b.amount);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. capture",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"idempotency_key\": \"{{$guid}}\" }" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('settlement_key', pm.response.json().settlement_key);"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. drain until settled",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/admin/drain?passes=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "drain"],
+              "query": [{ "key": "passes", "value": "5" }]
+            }
+          }
+        },
+        {
+          "name": "5. record the BEFORE counters",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/stats", "host": ["{{baseUrl}}"], "path": ["admin", "stats"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const d = pm.response.json().downstream;",
+                  "pm.collectionVariables.set('deduped_before', d.redundant_deliveries);",
+                  "console.log('deduped retries BEFORE = ' + d.redundant_deliveries);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. REDELIVER the same settlement key",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"settlement_key\": \"{{settlement_key}}\",\n  \"payment_id\": \"{{payment_id}}\",\n  \"amount_minor\": {{amount}},\n  \"currency\": \"INR\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/mock-settlement", "host": ["{{baseUrl}}"], "path": ["mock-settlement"] },
+            "description": "Exactly what a crashed instance or a post-commit timeout does: deliver a key the provider already settled. Note this body carries NO name — the response still echoes the name stored at first settlement, because the original settlement is what stands."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK — never an error', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('recognised as a duplicate', () => pm.expect(b.duplicate).to.be.true);",
+                  "pm.test('delivered more than once', () => pm.expect(b.delivery_count).to.be.above(1));",
+                  "pm.test('original name echoed back, not the absent one', () => pm.expect(b.name).to.eql('Dedupe demo'));",
+                  "console.log('delivery_count = ' + b.delivery_count + ', provider_ref = ' + b.provider_ref);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. deduped retries went UP, double-settled did NOT",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/stats", "host": ["{{baseUrl}}"], "path": ["admin", "stats"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const s = pm.response.json();",
+                  "const before = Number(pm.collectionVariables.get('deduped_before'));",
+                  "const after = s.downstream.redundant_deliveries;",
+                  "console.log('deduped retries AFTER = ' + after + ' (was ' + before + ')');",
+                  "pm.test('deduped retries increased', () => pm.expect(after).to.be.above(before));",
+                  "pm.test('deliveries exceed distinct settlement keys', () => pm.expect(s.downstream.total_deliveries).to.be.above(s.downstream.distinct_settlement_keys));",
+                  "pm.test('STILL no payment settled twice', () => pm.expect(s.invariants.double_settled_payments).to.eql(0));",
+                  "pm.test('safety still holds', () => pm.expect(s.invariants.safety_holds).to.be.true);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "F · Dead-lettering — terminal failure is visible, not dropped",
+      "item": [
+        {
+          "name": "1. force the downstream to fail every time",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"failure_rate\": 1.0 }" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/mock-settlement/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "mock-settlement", "config"]
+            },
+            "description": "NOTE: with the default SETTLEMENT_MAX_ATTEMPTS=10 and exponential backoff (250ms → 10s), exhausting attempts takes well over a minute of repeated draining. For a fast demo restart with SETTLEMENT_MAX_ATTEMPTS=2."
+          }
+        },
+        {
+          "name": "2. authorize + capture",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Doomed settlement\",\n  \"amount\": 999,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('payment_id', pm.response.json().id);"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. capture",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"idempotency_key\": \"{{$guid}}\" }" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            }
+          }
+        },
+        {
+          "name": "4. drain repeatedly (re-send until attempts exhaust)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/admin/drain?passes=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "drain"],
+              "query": [{ "key": "passes", "value": "50" }]
+            }
+          }
+        },
+        {
+          "name": "5. it is in the dead-letter queue, not lost",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/admin/dead-letters?limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "dead-letters"],
+              "query": [{ "key": "limit", "value": "100" }]
+            },
+            "description": "Nothing is silently dropped. Each entry carries last_error, attempts, and now the settlement name."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "console.log('dead letters: ' + pm.response.json().length);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. restore the fault rate",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"failure_rate\": 0.4 }" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/mock-settlement/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "mock-settlement", "config"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "G · Settlement name — end to end",
+      "item": [
+        {
+          "name": "0. pin fault rate to 0.0",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"failure_rate\": 0.0 }" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/mock-settlement/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "mock-settlement", "config"]
+            },
+            "description": "Step 5 needs the settlement to have actually landed, so the fault rate must be pinned here rather than inherited from whatever a previous folder left behind."
+          }
+        },
+        {
+          "name": "1. authorize with a name",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Umbrella Q3 settlement\",\n  \"amount\": 125000,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('payment_id', b.id);",
+                  "pm.collectionVariables.set('amount', b.amount);",
+                  "pm.test('name round-trips', () => pm.expect(b.name).to.eql('Umbrella Q3 settlement'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. a name over 120 chars is rejected at the edge",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\n  \"amount\": 100,\n  \"currency\": \"INR\",\n  \"idempotency_key\": \"{{$guid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/payments", "host": ["{{baseUrl}}"], "path": ["payments"] },
+            "description": "121 characters. Rejected by bean validation before any money logic runs — not by a database constraint violation surfacing as a 500."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('not a 500', () => pm.expect(pm.response.code).to.not.eql(500));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. capture",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"idempotency_key\": \"{{$guid}}\" }" },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{payment_id}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["payments", "{{payment_id}}", "capture"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('settlement_key', pm.response.json().settlement_key);"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. drain",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/admin/drain?passes=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "drain"],
+              "query": [{ "key": "passes", "value": "5" }]
+            }
+          }
+        },
+        {
+          "name": "5. prove the name reached the provider's own ledger",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"settlement_key\": \"{{settlement_key}}\",\n  \"payment_id\": \"{{payment_id}}\",\n  \"amount_minor\": {{amount}},\n  \"currency\": \"INR\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/mock-settlement", "host": ["{{baseUrl}}"], "path": ["mock-settlement"] },
+            "description": "This body carries NO name. If the response still returns one, it can only have come from the row the provider stored — which is the proof the name survived the network hop rather than being read back out of our own tables."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.test('duplicate delivery', () => pm.expect(b.duplicate).to.be.true);",
+                  "pm.test('name came from the provider ledger', () => pm.expect(b.name).to.eql('Umbrella Q3 settlement'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
