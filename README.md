@@ -12,7 +12,6 @@ resumable** draining. Java 21 · Spring Boot · PostgreSQL.
 | **Metrics (Prometheus)** | https://settlement-service-jyol.onrender.com/metrics |
 | **Dead letters** | https://settlement-service-jyol.onrender.com/admin/dead-letters |
 | **Logs — Grafana** | [public dashboard](https://proudglider3361.grafana.net/public-dashboards/9a349a9c33c44b019c1771c653dbc4eb) — no login |
-| **Logs — Better Stack** | [live tail](https://telemetry.betterstack.com/team/t579424/tail?s=l2656124) — **team access, sign-in required** |
 | **CI** | [GitHub Actions](../../actions) — suite + image + both gates against the container |
 
 Deployed as a Docker image on Render (Singapore), backed by Neon PostgreSQL, with logs

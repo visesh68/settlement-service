@@ -92,16 +92,50 @@
     .tbl-wrap { max-height:230px; overflow:auto; }
     .empty { color:var(--muted); font-size:12px; padding:28px 0; text-align:center; }
     .hidden { display:none; }
+
+    /* Navigation — same bar as the admin console, so the two pages feel like
+       one app and neither is a dead end. Sticky, because this page is long. */
+    nav { position:sticky; top:0; z-index:20; background:var(--panel); border-bottom:1px solid var(--line); }
+    .nav-inner { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:9px 24px; max-width:1280px; }
+    .tab {
+      font-size:13px; font-weight:600; text-decoration:none; color:var(--muted); line-height:1;
+      padding:8px 14px; border-radius:8px; border:1px solid transparent;
+    }
+    .tab:hover { color:var(--text); background:color-mix(in srgb, var(--accent) 12%, transparent); }
+    .tab[aria-current="page"] {
+      color:var(--accent); border-color:var(--accent);
+      background:color-mix(in srgb, var(--accent) 14%, transparent);
+    }
+    .nav-sep { width:1px; align-self:stretch; background:var(--line); margin:0 10px; }
+    .nav-label { font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-right:2px; }
+    .chip {
+      font-family:var(--mono); font-size:11.5px; text-decoration:none; color:var(--muted);
+      border:1px solid var(--line); border-radius:99px; padding:5px 11px; line-height:1.3;
+    }
+    .chip:hover { color:var(--accent); border-color:var(--accent); }
+    .chip::after { content:"↗"; font-size:9px; margin-left:5px; opacity:.55; }
+    @media (max-width:640px) { .nav-inner { padding:8px 14px; } .nav-sep { display:none; } }
   </style>
 </head>
 <body>
 <header>
   <h1>Settlement Service — metrics</h1>
   <span class="sub">read straight from /metrics in your browser · no collector, no Prometheus</span>
-  <span class="sub" style="margin-left:auto">
-    <a href="/">admin console</a> · <a href="/metrics">raw /metrics</a> · <a href="/admin/stats">/admin/stats</a>
-  </span>
 </header>
+
+<nav aria-label="Primary">
+  <div class="nav-inner">
+    <a class="tab" href="/">Admin console</a>
+    <a class="tab" href="/dashboard.html" aria-current="page">Metrics dashboard</a>
+    <span class="nav-sep" aria-hidden="true"></span>
+    <span class="nav-label">endpoints</span>
+    <a class="chip" href="/admin/stats" target="_blank" rel="noopener">/admin/stats</a>
+    <a class="chip" href="/admin/dead-letters" target="_blank" rel="noopener">dead letters</a>
+    <a class="chip" href="/metrics" target="_blank" rel="noopener">/metrics</a>
+    <a class="chip" href="/healthz" target="_blank" rel="noopener">/healthz</a>
+    <a class="chip" href="/readyz" target="_blank" rel="noopener">/readyz</a>
+  </div>
+</nav>
 
 <main>
   <section class="panel">
