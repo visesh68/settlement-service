@@ -92,6 +92,9 @@
     .tbl-wrap { max-height:230px; overflow:auto; }
     .empty { color:var(--muted); font-size:12px; padding:28px 0; text-align:center; }
     .hidden { display:none; }
+    /* Collection status. Quiet by default, loud only when the scrape breaks. */
+    .collect { margin:-4px 0 4px; font-size:11px; color:var(--muted); }
+    .collect.err { color:var(--critical); font-weight:600; }
 
     /* Navigation — same bar as the admin console, so the two pages feel like
        one app and neither is a dead end. Sticky, because this page is long. */
@@ -151,10 +154,11 @@
     <section class="panel" id="c-rates"></section>
   </div>
 
-  <section class="panel">
-    <h2>Collection</h2>
-    <p class="note" id="status">starting…</p>
-  </section>
+  <!-- Not a panel: this is collection metadata, and it is the only place a
+       failed scrape surfaces. The charts hold their last render at reduced
+       opacity rather than flashing a skeleton, so without this line stale
+       numbers would look live. -->
+  <p class="collect" id="status">starting…</p>
 </main>
 
 <script>
@@ -293,7 +297,7 @@
     const tableWrap = root.querySelector('.tbl-wrap');
 
     if (!series.length || series[0].points.length < 2) {
-      host.innerHTML = '<div class="empty">collecting…</div>';
+      host.innerHTML = '<div class="empty">' + esc(emptyMessage(spec)) + '</div>';
       return;
     }
 
@@ -328,11 +332,21 @@
     }
 
     // 2px lines, no point markers — a dot on every sample is noise at 150 samples.
+    //
+    // Gaps BREAK the line rather than being bridged. A missing sample means the
+    // metric had nothing to report in that window, and joining across it would
+    // draw latency that was never measured. The pen also has to start with a
+    // moveto, so a series whose first sample is null cannot emit a path that
+    // opens with a lineto.
     for (const s of series) {
-      const d = s.points
-        .map((p, i) => (p.v == null ? null : `${i === 0 ? 'M' : 'L'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`))
-        .filter(Boolean).join(' ');
-      parts.push(`<path d="${d}" fill="none" stroke="${css(s.color)}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+      let d = '';
+      let drawing = false;
+      for (const p of s.points) {
+        if (p.v == null) { drawing = false; continue; }
+        d += `${drawing ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)} `;
+        drawing = true;
+      }
+      parts.push(`<path d="${d.trim()}" fill="none" stroke="${css(s.color)}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
     }
 
     // Selective direct labels: the endpoint only. This is also the relief that
@@ -429,6 +443,31 @@
     });
   }
 
+  /**
+   * Why a chart is empty, said accurately.
+   *
+   * "collecting…" for everything is a lie two thirds of the time: a windowed
+   * chart can be empty because the poll only just started, because the 30s
+   * window is not full yet, or because nothing actually happened in it. Only
+   * the first two are worth waiting for. The latency timer in particular
+   * records only when the drainer calls the provider, so a drained outbox
+   * means there is genuinely no latency to plot — and telling someone to wait
+   * for it sends them staring at a chart that will never fill.
+   */
+  function emptyMessage(spec) {
+    if (history.length < 2) {
+      return 'collecting…';
+    }
+    if (spec.windowed) {
+      const span = history[history.length - 1].t - history[0].t;
+      if (span < RATE_WINDOW_MS) {
+        return `warming up — needs ${RATE_WINDOW_MS / 1000}s of samples`;
+      }
+      return spec.emptyNote || `nothing in the last ${RATE_WINDOW_MS / 1000}s`;
+    }
+    return spec.emptyNote || 'no data';
+  }
+
   const clock = t => new Date(t).toLocaleTimeString();
   /** Round up to the next 1-2-2.5-5-10 step. A plain ceil-to-power-of-ten turns a
    *  max of 1.1 into an axis of 10 (or 2, one magnitude down) and pins every line
@@ -474,6 +513,8 @@
       },
       latency: {
         title: 'Downstream settlement latency', unit: 'quantiles over the last 30s', fmt: ms,
+        windowed: true,
+        emptyNote: 'no settlement calls in the last 30s — the timer only records when the drainer reaches the provider, so a drained outbox has no latency to show. Capture a payment to populate it.',
         note: 'Real quantiles from the histogram buckets, windowed — not inferred from a mean, and not a lifetime average. The simulated provider sleeps 100–500ms by design.',
         series: [
           { name: 'p50', color: '--s1', points: ptsByIdx(i => quantileAt(i, 0.50)) },
@@ -483,6 +524,8 @@
       },
       rates: {
         title: 'Settlement throughput', unit: 'per second, 30s window', fmt: per,
+        windowed: true,
+        emptyNote: 'no settlement activity in the last 30s — the outbox is drained',
         note: 'Attempts well above successes is the fault injector doing its job, not an incident. Dead letters above zero is.',
         series: [
           { name: 'attempts', color: '--s1', points: ptsByIdx(i => rateAt(i, 'attempts')) },
@@ -555,6 +598,7 @@
 
   async function tick() {
     const plots = document.querySelectorAll('.plot');
+    const status = document.getElementById('status');
     try {
       const res = await fetch('/metrics', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -562,13 +606,16 @@
       plots.forEach(p => p.classList.remove('stale'));
       draw();
       const mins = history.length < 2 ? 0 : (history[history.length - 1].t - history[0].t) / 60000;
-      document.getElementById('status').textContent =
+      status.className = 'collect';
+      status.textContent =
         `${history.length} samples over ${mins.toFixed(1)} min · polling /metrics every ${POLL_MS / 1000}s · `
         + `rates and quantiles use a ${RATE_WINDOW_MS / 1000}s window · history is in-memory and resets on reload`;
     } catch (e) {
-      // Hold the last good render rather than blanking it.
+      // Hold the last good render rather than blanking it — and say so, or the
+      // dimmed charts read as live data to anyone not watching closely.
       plots.forEach(p => p.classList.add('stale'));
-      document.getElementById('status').textContent = 'scrape failed: ' + e.message + ' — showing the last good sample';
+      status.className = 'collect err';
+      status.textContent = 'scrape failed: ' + e.message + ' — charts are frozen at the last good sample';
     }
   }
 
