@@ -152,12 +152,49 @@ blueprints are included.
 
 ### Render + Neon
 
-1. **Neon** → create a free project, copy the connection string, convert to JDBC:
-   `jdbc:postgresql://ep-xxx.region.aws.neon.tech/neondb?sslmode=require`
-2. **Render** → New → Blueprint → point at this repository. [`render.yaml`](render.yaml)
-   deploys the Dockerfile and health-checks `/readyz`.
-3. Set `DATABASE_URL`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` in the dashboard. They are
-   `sync: false`, so they are prompted for and never committed.
+**1. Neon — create the database.** Sign in at [neon.tech](https://neon.tech), create a
+project (region **Singapore / ap-southeast-1**, to match `render.yaml`). On the dashboard,
+open **Connection Details** and make sure **Connection pooling is OFF** — copy the
+*direct* string, not the `-pooler` one:
+
+> Flyway serialises migrations with a **session-scoped** advisory lock. Neon's pooler runs
+> PgBouncer in transaction mode, which does not pin a session to a connection, so that lock
+> becomes unreliable. The direct endpoint is the correct choice here, and `DB_POOL_MAX=10`
+> keeps us far inside the free connection limit anyway.
+
+Neon gives you something like:
+
+```
+postgresql://neondb_owner:npg_AbC123@ep-cool-frost-12345678.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+        └── username ──┘ └─ password ─┘ └──────────────── host ────────────────────────┘ └─ db ─┘
+```
+
+Split it into the three variables Render needs — note the `jdbc:` prefix, the credentials
+removed from the URL, and **`channel_binding` dropped** (libpq understands it, the
+PostgreSQL JDBC driver does not and will reject the URL):
+
+| variable | value |
+|---|---|
+| `DATABASE_URL` | `jdbc:postgresql://ep-cool-frost-12345678.ap-southeast-1.aws.neon.tech/neondb?sslmode=require` |
+| `DATABASE_USERNAME` | `neondb_owner` |
+| `DATABASE_PASSWORD` | `npg_AbC123` |
+
+**2. Render — deploy the blueprint.** Sign in at [render.com](https://render.com), connect
+your GitHub account, then **New → Blueprint** and pick this repository. Render reads
+[`render.yaml`](render.yaml): Docker runtime, free plan, Singapore, health check on
+`/readyz`. It will prompt for the three `DATABASE_*` values above — they are `sync: false`,
+so they live in Render's dashboard and never in git. Click **Apply**.
+
+First build takes ~5 minutes (Maven downloads its dependencies). Flyway migrates on first
+boot; there is no manual migration step.
+
+**3. Verify.** Once the service is live:
+
+```bash
+curl -s https://<your-service>.onrender.com/readyz
+./scripts/gate1-concurrent-capture.sh https://<your-service>.onrender.com 20
+./scripts/gate2-exactly-once-settlement.sh https://<your-service>.onrender.com 25 0.4
+```
 
 > Render's free web service sleeps after ~15 minutes idle, and a sleeping instance is not
 > draining its outbox. Nothing is lost — the outbox is durable and the next request wakes

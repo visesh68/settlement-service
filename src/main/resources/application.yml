@@ -28,7 +28,14 @@ spring:
       # concurrency or requests queue on the pool instead of the lock.
       maximum-pool-size: ${DB_POOL_MAX:24}
       minimum-idle: ${DB_POOL_MIN:2}
-      connection-timeout: 10000
+      # Generous by default because serverless Postgres (Neon, Supabase) suspends
+      # its compute when idle and takes a moment to wake. A tight timeout here
+      # turns a normal cold start into a failed request.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT:20000}
+      # Hikari fails fast on startup by default. With a suspended database that
+      # means the process dies before the compute has finished waking, and the
+      # platform restarts it into the same race. Retry for a while instead.
+      initialization-fail-timeout: ${DB_INIT_FAIL_TIMEOUT:60000}
       max-lifetime: 900000
 
   flyway:

@@ -1,12 +1,21 @@
 # Render blueprint. Deploys the Docker image built from ./Dockerfile - not a
 # buildpack - so what runs in production is the same artifact as `docker compose up`.
 #
-# Setup:
-#   1. Create a free Postgres at neon.tech and copy its connection string.
-#   2. In Render: New > Blueprint, point at this repository.
-#   3. Set the DATABASE_* environment variables in the dashboard (they are
-#      marked sync:false below, so Render prompts for them and never stores
-#      them in git).
+# Setup: see the "Deploying" section of README.md. In short:
+#   1. Create a free Postgres project at neon.tech, in the Singapore region to
+#      match the region below.
+#   2. Copy the DIRECT connection string - NOT the "-pooler" one. Flyway takes a
+#      session-scoped advisory lock to serialise migrations, and PgBouncer in
+#      transaction mode (which is what Neon's pooler runs) does not keep a
+#      session pinned, so the lock is unreliable there.
+#   3. Convert it to JDBC form and drop channel_binding, which libpq understands
+#      and the PostgreSQL JDBC driver does not:
+#        postgresql://USER:PASS@ep-xxx.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+#        -> jdbc:postgresql://ep-xxx.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+#      Username and password go in their own variables, not in the URL.
+#   4. In Render: New > Blueprint, point at this repository, and fill in the
+#      three DATABASE_* values when prompted. They are marked sync:false below,
+#      so Render asks for them and they never enter git.
 services:
   - type: web
     name: settlement-service
@@ -37,4 +46,10 @@ services:
       # keeps well inside a free Postgres connection limit.
       - key: DB_POOL_MAX
         value: "10"
+      # Neon suspends its compute when idle. Give a waking database time to
+      # answer rather than failing the request or the boot.
+      - key: DB_CONNECTION_TIMEOUT
+        value: "30000"
+      - key: DB_INIT_FAIL_TIMEOUT
+        value: "90000"
       # Render injects PORT itself; the app reads it.
