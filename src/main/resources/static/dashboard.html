@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settlement Service — metrics</title>
+  <style>
+    /* Page chrome matches index.html: dark is the default, light is the override. */
+    :root {
+      --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e9ef;
+      --muted: #98a2b3; --accent: #6ea8fe;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+      /* Categorical slots, dark steps, validated against this panel surface
+         (#171a21): worst adjacent CVD dE 8.4, normal-vision 19.8, all >= 3:1. */
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+
+      /* Chart chrome. Hairlines, one shade off the surface, never dashed. */
+      --grid: #2c2c2a; --axis: #383835; --ink-muted: #898781;
+
+      /* Status palette is fixed and never themed. Reserved for state,
+         never reused as a series color. */
+      --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --text:#12141a; --muted:#5b6472;
+        /* Light steps, validated against #ffffff: worst adjacent CVD dE 9.1,
+           normal-vision 22.9. Aqua and yellow fall under 3:1, so every chart
+           ships endpoint labels + a table view (the relief rule). */
+        --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+        --grid:#e1e0d9; --axis:#c3c2b7;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+    h1 { font-size:16px; margin:0; font-weight:600; }
+    header .sub { color:var(--muted); font-size:12px; }
+    a { color:var(--accent); }
+    main { padding:20px 24px; display:grid; gap:18px; max-width:1280px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+    .panel h2 { margin:0 0 4px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:600; }
+    .panel .note { margin:0 0 12px; font-size:12px; color:var(--muted); }
+
+    .grid2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(420px,1fr)); gap:18px; }
+
+    /* ---- Safety tiles. Status colour never travels alone: icon + label too. ---- */
+    .tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:10px; }
+    .tile { border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tile .k { color:var(--muted); font-size:11px; display:flex; align-items:center; gap:6px; }
+    /* Proportional figures, not tabular: equal-width digits read loose at display size. */
+    .tile .v { font-size:26px; margin-top:4px; font-weight:600; letter-spacing:-0.01em; }
+    .tile .st { font-size:11px; margin-top:2px; }
+    .is-good { color:var(--good); } .is-critical { color:var(--critical); } .is-warning { color:var(--warning); }
+
+    /* ---- Chart card ---- */
+    .chart-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+    .chart-head h3 { margin:0; font-size:13px; font-weight:600; }
+    .chart-head .unit { color:var(--muted); font-size:11px; }
+    .chart-head .toggle { margin-left:auto; }
+    button {
+      font:inherit; font-size:11px; cursor:pointer; background:transparent; color:var(--accent);
+      border:1px solid var(--line); border-radius:6px; padding:3px 9px;
+    }
+    button:hover { background:color-mix(in srgb, var(--accent) 14%, transparent); }
+    button[aria-pressed="true"] { border-color:var(--accent); }
+
+    /* Legend is always present for >= 2 series; identity is never colour alone. */
+    .legend { display:flex; gap:14px; flex-wrap:wrap; margin:2px 0 6px; font-size:11px; color:var(--muted); }
+    .legend span { display:inline-flex; align-items:center; gap:5px; }
+    .swatch { width:9px; height:9px; border-radius:2px; display:inline-block; }
+
+    .plot { position:relative; }
+    .plot svg { display:block; width:100%; height:auto; }
+    /* Refetch holds the previous render at reduced opacity — never a skeleton flash. */
+    .plot.stale { opacity:.55; transition:opacity .15s; }
+
+    .tip {
+      position:absolute; pointer-events:none; z-index:5; background:var(--panel);
+      border:1px solid var(--line); border-radius:6px; padding:7px 9px; font-size:11px;
+      box-shadow:0 4px 14px rgba(0,0,0,.28); white-space:nowrap; opacity:0; transition:opacity .1s;
+    }
+    .tip .tt { color:var(--muted); margin-bottom:4px; }
+    .tip .tr { display:flex; align-items:center; gap:6px; }
+    .tip .tv { margin-left:auto; font-variant-numeric:tabular-nums; }
+
+    table { width:100%; border-collapse:collapse; font-size:11px; font-variant-numeric:tabular-nums; }
+    th, td { text-align:right; padding:4px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+    th:first-child, td:first-child { text-align:left; }
+    th { color:var(--muted); font-weight:500; }
+    .tbl-wrap { max-height:230px; overflow:auto; }
+    .empty { color:var(--muted); font-size:12px; padding:28px 0; text-align:center; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Settlement Service — metrics</h1>
+  <span class="sub">read straight from /metrics in your browser · no collector, no Prometheus</span>
+  <span class="sub" style="margin-left:auto">
+    <a href="/">admin console</a> · <a href="/metrics">raw /metrics</a> · <a href="/admin/stats">/admin/stats</a>
+  </span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Safety</h2>
+    <p class="note">Answered from the provider's own ledger, not our bookkeeping. Every one of these must stay at zero.</p>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="panel" id="c-evidence"></section>
+    <section class="panel" id="c-outbox"></section>
+    <section class="panel" id="c-latency"></section>
+    <section class="panel" id="c-rates"></section>
+  </div>
+
+  <section class="panel">
+    <h2>Collection</h2>
+    <p class="note" id="status">starting…</p>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  const POLL_MS = 2000;
+  const KEEP = 150;                 // ~5 minutes of history
+  const RATE_WINDOW_MS = 30000;     // counters and quantiles are windowed, not lifetime
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+  // ------------------------------------------------------------------
+  // Prometheus text parsing
+  // ------------------------------------------------------------------
+  const LINE = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+(-?[0-9.eE+]+|NaN|\+Inf|-Inf)\s*$/;
+
+  function parseExposition(text) {
+    const out = new Map();          // name -> [{labels, value}]
+    for (const raw of text.split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const m = LINE.exec(line);
+      if (!m) continue;
+      const [, name, labelBlob, rawValue] = m;
+      const value = rawValue === '+Inf' ? Infinity : rawValue === 'NaN' ? NaN : Number(rawValue);
+      const labels = {};
+      if (labelBlob) {
+        for (const part of labelBlob.match(/[a-zA-Z_][a-zA-Z0-9_]*="(?:\\.|[^"\\])*"/g) || []) {
+          const eq = part.indexOf('=');
+          labels[part.slice(0, eq)] = part.slice(eq + 2, -1);
+        }
+      }
+      if (!out.has(name)) out.set(name, []);
+      out.get(name).push({ labels, value });
+    }
+    return out;
+  }
+
+  const scalar = (fam, name) => {
+    const rows = fam.get(name);
+    return rows && rows.length ? rows[0].value : null;
+  };
+  const byLabel = (fam, name, label) => {
+    const map = {};
+    for (const r of fam.get(name) || []) map[r.labels[label]] = r.value;
+    return map;
+  };
+
+  // ------------------------------------------------------------------
+  // Sample history
+  // ------------------------------------------------------------------
+  const history = [];
+
+  function record(fam) {
+    const buckets = (fam.get('settlement_call_duration_seconds_bucket') || [])
+      .map(r => ({ le: r.labels.le === '+Inf' ? Infinity : Number(r.labels.le), count: r.value }))
+      .sort((a, b) => a.le - b.le);
+
+    history.push({
+      t: Date.now(),
+      outbox: byLabel(fam, 'settlement_outbox_size', 'status'),
+      deliveries: scalar(fam, 'settlement_total_deliveries'),
+      distinctKeys: scalar(fam, 'settlement_distinct_keys'),
+      deduped: scalar(fam, 'settlement_redundant_deliveries'),
+      safety: scalar(fam, 'settlement_safety_holds'),
+      doubleSettled: scalar(fam, 'settlement_double_settled'),
+      orphanCaptures: scalar(fam, 'settlement_captured_without_outbox'),
+      phantom: scalar(fam, 'settlement_settled_not_captured'),
+      outstanding: scalar(fam, 'settlement_outstanding'),
+      unreconciled: scalar(fam, 'settlement_settled_downstream_not_recorded'),
+      counters: {
+        attempts: scalar(fam, 'settlement_attempts_total'),
+        success: scalar(fam, 'settlement_success_total'),
+        retry: scalar(fam, 'settlement_retry_total'),
+        dead: scalar(fam, 'settlement_dead_letter_total')
+      },
+      buckets
+    });
+    while (history.length > KEEP) history.shift();
+  }
+
+  /** The sample closest to `ms` before the one at `idx`, or null if history is too short. */
+  function baselineFor(idx, ms) {
+    const target = history[idx].t - ms;
+    for (let j = idx; j >= 0; j--) if (history[j].t <= target) return history[j];
+    return null;
+  }
+
+  /** Per-second rate of a counter over the window. Counters only ever rise, so a
+   *  drop means the process restarted; report null rather than a negative spike. */
+  function rateAt(idx, key) {
+    const now = history[idx];
+    const then = baselineFor(idx, RATE_WINDOW_MS);
+    if (!then || now.counters[key] == null || then.counters[key] == null) return null;
+    const dt = (now.t - then.t) / 1000;
+    if (dt <= 0) return null;
+    const dv = now.counters[key] - then.counters[key];
+    return dv < 0 ? null : dv / dt;
+  }
+
+  /** Quantile over the buckets accumulated *within the window*, not since boot. */
+  function quantileAt(idx, q) {
+    const now = history[idx];
+    const then = baselineFor(idx, RATE_WINDOW_MS);
+    if (!now.buckets.length) return null;
+
+    const prev = new Map((then ? then.buckets : []).map(b => [b.le, b.count]));
+    const windowed = now.buckets.map(b => ({ le: b.le, count: Math.max(0, b.count - (prev.get(b.le) || 0)) }));
+    const total = windowed.length ? windowed[windowed.length - 1].count : 0;
+    if (!total) return null;
+
+    const target = q * total;
+    let prevLe = 0, prevCount = 0;
+    for (const b of windowed) {
+      if (b.count >= target) {
+        if (!isFinite(b.le)) return prevLe;
+        const span = b.count - prevCount;
+        return span <= 0 ? b.le : prevLe + (b.le - prevLe) * ((target - prevCount) / span);
+      }
+      prevLe = b.le; prevCount = b.count;
+    }
+    return prevLe;
+  }
+
+  // ------------------------------------------------------------------
+  // Line chart. One y-axis, always — two measures of different scale get
+  // two charts, never a second axis.
+  // ------------------------------------------------------------------
+  const PAD = { top: 12, right: 68, bottom: 26, left: 48 };
+  const PLOT_H = 150;
+
+  function renderChart(root, spec) {
+    const series = spec.series.filter(s => s.points.some(p => p.v != null));
+    const host = root.querySelector('.plot');
+    const tableWrap = root.querySelector('.tbl-wrap');
+
+    if (!series.length || series[0].points.length < 2) {
+      host.innerHTML = '<div class="empty">collecting…</div>';
+      return;
+    }
+
+    const W = Math.max(320, host.clientWidth || 460);
+    const H = PLOT_H + PAD.top + PAD.bottom;
+    const innerW = W - PAD.left - PAD.right;
+
+    const all = series.flatMap(s => s.points.map(p => p.v)).filter(v => v != null);
+    let lo = Math.min(0, ...all), hi = Math.max(...all);
+    if (hi === lo) hi = lo + 1;
+    hi = niceCeil(hi);
+
+    const t0 = series[0].points[0].t;
+    const t1 = series[0].points[series[0].points.length - 1].t;
+    const span = Math.max(1, t1 - t0);
+    const x = t => PAD.left + ((t - t0) / span) * innerW;
+    const y = v => PAD.top + PLOT_H - ((v - lo) / (hi - lo)) * PLOT_H;
+
+    const parts = [];
+    // Gridlines: solid hairlines one shade off the surface. Never dashed.
+    for (let i = 0; i <= 4; i++) {
+      const v = lo + ((hi - lo) * i) / 4;
+      const gy = y(v);
+      parts.push(`<line x1="${PAD.left}" y1="${gy}" x2="${PAD.left + innerW}" y2="${gy}" stroke="${css('--grid')}" stroke-width="1"/>`);
+      parts.push(`<text x="${PAD.left - 8}" y="${gy + 3.5}" text-anchor="end" font-size="10" fill="${css('--ink-muted')}" style="font-variant-numeric:tabular-nums">${esc(spec.fmt(v))}</text>`);
+    }
+    parts.push(`<line x1="${PAD.left}" y1="${PAD.top + PLOT_H}" x2="${PAD.left + innerW}" y2="${PAD.top + PLOT_H}" stroke="${css('--axis')}" stroke-width="1"/>`);
+
+    for (let i = 0; i <= 2; i++) {
+      const t = t0 + (span * i) / 2;
+      parts.push(`<text x="${x(t)}" y="${PAD.top + PLOT_H + 16}" text-anchor="${i === 0 ? 'start' : i === 2 ? 'end' : 'middle'}" font-size="10" fill="${css('--ink-muted')}">${clock(t)}</text>`);
+    }
+
+    // 2px lines, no point markers — a dot on every sample is noise at 150 samples.
+    for (const s of series) {
+      const d = s.points
+        .map((p, i) => (p.v == null ? null : `${i === 0 ? 'M' : 'L'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`))
+        .filter(Boolean).join(' ');
+      parts.push(`<path d="${d}" fill="none" stroke="${css(s.color)}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+    }
+
+    // Selective direct labels: the endpoint only. This is also the relief that
+    // light-mode aqua and yellow require, since both sit under 3:1 on white.
+    const placed = [];
+    for (const s of series) {
+      const last = [...s.points].reverse().find(p => p.v != null);
+      if (!last) continue;
+      let ly = y(last.v);
+      while (placed.some(p => Math.abs(p - ly) < 11)) ly += 11;   // nudge, never overlap
+      placed.push(ly);
+      parts.push(`<circle cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3" fill="${css(s.color)}" stroke="${css('--panel')}" stroke-width="2"/>`);
+      parts.push(`<text x="${PAD.left + innerW + 8}" y="${ly + 3.5}" font-size="10" fill="${css('--ink-muted')}" style="font-variant-numeric:tabular-nums">${esc(spec.fmt(last.v))}</text>`);
+    }
+
+    parts.push(`<line class="hair" x1="0" y1="${PAD.top}" x2="0" y2="${PAD.top + PLOT_H}" stroke="${css('--axis')}" stroke-width="1" opacity="0"/>`);
+    parts.push(`<rect class="hit" x="${PAD.left}" y="${PAD.top}" width="${innerW}" height="${PLOT_H}" fill="transparent"/>`);
+
+    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(spec.title)}">${parts.join('')}</svg><div class="tip"></div>`;
+    wireHover(host, spec, series, x, t0, t1);
+
+    if (tableWrap && !tableWrap.classList.contains('hidden')) renderTable(tableWrap, spec, series);
+  }
+
+  function wireHover(host, spec, series, x, t0, t1) {
+    const svg = host.querySelector('svg');
+    const hair = svg.querySelector('.hair');
+    const tip = host.querySelector('.tip');
+    const hit = svg.querySelector('.hit');
+
+    const move = evt => {
+      const box = svg.getBoundingClientRect();
+      const scale = svg.viewBox.baseVal.width / box.width;
+      const px = (evt.clientX - box.left) * scale;
+      const frac = Math.min(1, Math.max(0, (px - PAD.left) / (x(t1) - x(t0) || 1)));
+      const t = t0 + frac * (t1 - t0);
+
+      let best = 0, bestD = Infinity;
+      series[0].points.forEach((p, i) => {
+        const d = Math.abs(p.t - t);
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      const at = series[0].points[best].t;
+
+      hair.setAttribute('x1', x(at)); hair.setAttribute('x2', x(at));
+      hair.setAttribute('opacity', '1');
+
+      const rows = series.map(s => {
+        const p = s.points[best];
+        return `<div class="tr"><span class="swatch" style="background:${css(s.color)}"></span>${esc(s.name)}<span class="tv">${p && p.v != null ? esc(spec.fmt(p.v)) : '—'}</span></div>`;
+      }).join('');
+      tip.innerHTML = `<div class="tt">${clock(at)}</div>${rows}`;
+      tip.style.opacity = '1';
+
+      const left = (x(at) / scale) + 14;
+      tip.style.left = Math.min(left, box.width - tip.offsetWidth - 8) + 'px';
+      tip.style.top = '8px';
+    };
+
+    hit.addEventListener('mousemove', move);
+    hit.addEventListener('mouseleave', () => { tip.style.opacity = '0'; hair.setAttribute('opacity', '0'); });
+  }
+
+  /** The WCAG-clean twin. Every value a chart shows is reachable without colour. */
+  function renderTable(wrap, spec, series) {
+    const rows = [];
+    const pts = series[0].points;
+    for (let i = pts.length - 1; i >= Math.max(0, pts.length - 40); i--) {
+      rows.push(`<tr><td>${clock(pts[i].t)}</td>${series.map(s =>
+        `<td>${s.points[i] && s.points[i].v != null ? esc(spec.fmt(s.points[i].v)) : '—'}</td>`).join('')}</tr>`);
+    }
+    wrap.innerHTML = `<table><thead><tr><th>time</th>${series.map(s => `<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  }
+
+  function chartShell(root, spec) {
+    root.innerHTML = `
+      <div class="chart-head">
+        <h3>${esc(spec.title)}</h3><span class="unit">${esc(spec.unit)}</span>
+        <span class="toggle"><button type="button" aria-pressed="false">table view</button></span>
+      </div>
+      <p class="note">${esc(spec.note)}</p>
+      <div class="legend">${spec.series.map(s =>
+        `<span><i class="swatch" style="background:${css(s.color)}"></i>${esc(s.name)}</span>`).join('')}</div>
+      <div class="plot"></div>
+      <div class="tbl-wrap hidden"></div>`;
+    const btn = root.querySelector('button');
+    btn.addEventListener('click', () => {
+      const showing = btn.getAttribute('aria-pressed') === 'true';
+      btn.setAttribute('aria-pressed', String(!showing));
+      btn.textContent = showing ? 'table view' : 'chart view';
+      root.querySelector('.plot').classList.toggle('hidden', !showing);
+      root.querySelector('.tbl-wrap').classList.toggle('hidden', showing);
+      draw();
+    });
+  }
+
+  const clock = t => new Date(t).toLocaleTimeString();
+  /** Round up to the next 1-2-2.5-5-10 step. A plain ceil-to-power-of-ten turns a
+   *  max of 1.1 into an axis of 10 (or 2, one magnitude down) and pins every line
+   *  to the floor — the series stop being readable even though the numbers are right. */
+  const niceCeil = v => {
+    if (v <= 0) return 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(v)));
+    const norm = v / mag;
+    const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10;
+    return step * mag;
+  };
+  const int = v => Math.round(v).toLocaleString();
+  const ms = v => (v * 1000 < 10 ? (v * 1000).toFixed(1) : Math.round(v * 1000).toLocaleString()) + 'ms';
+  const per = v => (v < 1 ? v.toFixed(2) : v.toFixed(1)) + '/s';
+
+  // ------------------------------------------------------------------
+  // Specs
+  // ------------------------------------------------------------------
+  function specs() {
+    const idx = history.map((_, i) => i);
+    const pts = pick => history.map(h => ({ t: h.t, v: pick(h) }));
+    const ptsByIdx = pick => history.map((h, i) => ({ t: h.t, v: pick(i) }));
+
+    return {
+      evidence: {
+        title: 'Effectively-once', unit: 'cumulative count', fmt: int,
+        note: 'The gap between deliveries and distinct settlements IS the guarantee. Deduped retries rising is healthy — it is the evidence, not a fault.',
+        series: [
+          { name: 'deliveries', color: '--s1', points: pts(h => h.deliveries) },
+          { name: 'distinct settlements', color: '--s2', points: pts(h => h.distinctKeys) },
+          { name: 'deduped retries', color: '--s3', points: pts(h => h.deduped) }
+        ]
+      },
+      outbox: {
+        title: 'Outbox depth', unit: 'rows', fmt: int,
+        note: 'PENDING and IN_FLIGHT are work still owed. DEAD_LETTER above zero is a queue waiting on a human.',
+        series: [
+          { name: 'PENDING', color: '--s1', points: pts(h => h.outbox.PENDING) },
+          { name: 'IN_FLIGHT', color: '--s2', points: pts(h => h.outbox.IN_FLIGHT) },
+          { name: 'SETTLED', color: '--s3', points: pts(h => h.outbox.SETTLED) },
+          { name: 'DEAD_LETTER', color: '--s4', points: pts(h => h.outbox.DEAD_LETTER) }
+        ]
+      },
+      latency: {
+        title: 'Downstream settlement latency', unit: 'quantiles over the last 30s', fmt: ms,
+        note: 'Real quantiles from the histogram buckets, windowed — not inferred from a mean, and not a lifetime average. The simulated provider sleeps 100–500ms by design.',
+        series: [
+          { name: 'p50', color: '--s1', points: ptsByIdx(i => quantileAt(i, 0.50)) },
+          { name: 'p95', color: '--s2', points: ptsByIdx(i => quantileAt(i, 0.95)) },
+          { name: 'p99', color: '--s3', points: ptsByIdx(i => quantileAt(i, 0.99)) }
+        ]
+      },
+      rates: {
+        title: 'Settlement throughput', unit: 'per second, 30s window', fmt: per,
+        note: 'Attempts well above successes is the fault injector doing its job, not an incident. Dead letters above zero is.',
+        series: [
+          { name: 'attempts', color: '--s1', points: ptsByIdx(i => rateAt(i, 'attempts')) },
+          { name: 'successes', color: '--s2', points: ptsByIdx(i => rateAt(i, 'success')) },
+          { name: 'retries', color: '--s3', points: ptsByIdx(i => rateAt(i, 'retry')) },
+          { name: 'dead letters', color: '--s4', points: ptsByIdx(i => rateAt(i, 'dead')) }
+        ]
+      }
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // Safety tiles
+  // ------------------------------------------------------------------
+  function renderTiles(latest) {
+    const tile = (key, value, state, caption) => {
+      const icon = state === 'is-good' ? '✓' : state === 'is-critical' ? '✕' : '!';
+      return `<div class="tile">
+        <div class="k"><span class="${state}" aria-hidden="true">${icon}</span>${esc(key)}</div>
+        <div class="v ${state}">${esc(value)}</div>
+        <div class="st ${state}">${esc(caption)}</div>
+      </div>`;
+    };
+    const zero = (v, label) => v === 0
+      ? tile(label, '0', 'is-good', 'none observed')
+      : tile(label, int(v), 'is-critical', 'investigate now');
+
+    const l = latest;
+    document.getElementById('tiles').innerHTML = [
+      l.safety === 1
+        ? tile('safety', 'HOLDS', 'is-good', 'all invariants satisfied')
+        : tile('safety', 'VIOLATED', 'is-critical', 'inspect /admin/stats'),
+      zero(l.doubleSettled, 'double-settled payments'),
+      zero(l.orphanCaptures, 'captured, never queued'),
+      zero(l.phantom, 'settled, never captured'),
+      l.unreconciled === 0
+        ? tile('unreconciled', '0', 'is-good', 'books agree with provider')
+        : tile('unreconciled', int(l.unreconciled), 'is-warning', 'transient mid-drain; persistent needs a look'),
+      tile('outstanding', int(l.outstanding), l.outstanding === 0 ? 'is-good' : 'is-warning',
+        l.outstanding === 0 ? 'outbox drained' : 'still draining')
+    ].join('');
+  }
+
+  // ------------------------------------------------------------------
+  // Loop
+  // ------------------------------------------------------------------
+  const roots = {
+    evidence: document.getElementById('c-evidence'),
+    outbox: document.getElementById('c-outbox'),
+    latency: document.getElementById('c-latency'),
+    rates: document.getElementById('c-rates')
+  };
+  let built = false;
+
+  function draw() {
+    if (!history.length) return;
+    const s = specs();
+    if (!built) { for (const k of Object.keys(roots)) chartShell(roots[k], s[k]); built = true; }
+    for (const k of Object.keys(roots)) {
+      const showingTable = roots[k].querySelector('button').getAttribute('aria-pressed') === 'true';
+      if (showingTable) {
+        const live = s[k].series.filter(x => x.points.some(p => p.v != null));
+        if (live.length) renderTable(roots[k].querySelector('.tbl-wrap'), s[k], live);
+      } else {
+        renderChart(roots[k], s[k]);
+      }
+    }
+    renderTiles(history[history.length - 1]);
+  }
+
+  async function tick() {
+    const plots = document.querySelectorAll('.plot');
+    try {
+      const res = await fetch('/metrics', { headers: { Accept: 'text/plain' } });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      record(parseExposition(await res.text()));
+      plots.forEach(p => p.classList.remove('stale'));
+      draw();
+      const mins = history.length < 2 ? 0 : (history[history.length - 1].t - history[0].t) / 60000;
+      document.getElementById('status').textContent =
+        `${history.length} samples over ${mins.toFixed(1)} min · polling /metrics every ${POLL_MS / 1000}s · `
+        + `rates and quantiles use a ${RATE_WINDOW_MS / 1000}s window · history is in-memory and resets on reload`;
+    } catch (e) {
+      // Hold the last good render rather than blanking it.
+      plots.forEach(p => p.classList.add('stale'));
+      document.getElementById('status').textContent = 'scrape failed: ' + e.message + ' — showing the last good sample';
+    }
+  }
+
+  tick();
+  setInterval(tick, POLL_MS);
+  addEventListener('resize', () => { if (built) draw(); });
+})();
+</script>
+</body>
+</html>
