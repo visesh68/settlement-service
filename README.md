@@ -6,6 +6,7 @@ resumable** draining. Java 21 · Spring Boot · PostgreSQL.
 
 | | |
 |---|---|
+| **Explanation video** | [walkthrough on Vimeo](https://vimeo.com/1215920236) — the design, end to end |
 | **Live app** | https://settlement-service-jyol.onrender.com |
 | **Invariants, one request** | https://settlement-service-jyol.onrender.com/admin/stats |
 | **Metrics dashboard** | https://settlement-service-jyol.onrender.com/dashboard.html |
