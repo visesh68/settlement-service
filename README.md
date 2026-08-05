@@ -225,26 +225,44 @@ fly secrets set DATABASE_URL='jdbc:postgresql://...?sslmode=require' \
 fly deploy
 ```
 
-### Shipping logs
+### Shipping logs to Grafana Cloud
 
-Logs are JSON on stdout, so any hosted backend ingests them without an agent config:
+Logs go to stdout as JSON always. Setting the `loki` profile *additionally* ships them to
+Grafana Cloud Loki, which is what backs the public dashboard link:
 
-- **Better Stack** — add a source, drop the token into the host's log-drain setting.
-- **Grafana Cloud (Loki)** — free tier; on Fly, `fly logs` can be forwarded with the
-  `fly-log-shipper` app.
-- **Axiom** — free tier, similar drain setup.
-
-Then share a read-only/public dashboard link. Correlated queries worth saving:
-
+```bash
+SPRING_PROFILES_ACTIVE=loki
+LOKI_URL=https://logs-prod-XXX.grafana.net/loki/api/v1/push
+LOKI_USERNAME=<numeric user/instance id>
+LOKI_PASSWORD=<API token with logs:write>
 ```
-{app="settlement-service"} | json | event = "settlement_retry_scheduled"
-{app="settlement-service"} | json | event = "settlement_dead_lettered"
-{app="settlement-service"} | json | correlation_id = "<id from a capture response>"
+
+Get all three from Grafana Cloud → **Connections → Loki → Send logs** (the "URL", "User"
+and a generated token).
+
+An app-side appender rather than a platform log drain, for two reasons: Render forwards
+syslog while Loki ingests HTTP, and this way the pipeline works identically on any host or
+under `docker compose`. Without the profile the appender does not exist, so nothing to
+misconfigure locally or in tests.
+
+Labels are deliberately just `service` and `level`. Loki indexes labels, so putting
+`payment_id` or `correlation_id` there would create a stream per payment; those live in the
+log line, which is JSON, so `| json` promotes them to real fields.
+
+Queries worth saving:
+
+```logql
+{service="settlement-service"} | json | msg =~ "event=settlement_retry_scheduled.*"
+{service="settlement-service"} | json | msg =~ "event=settlement_dead_lettered.*"
+{service="settlement-service"} | json | correlation_id = "<id from a capture response>"
 ```
 
 The last one is the useful one: it returns the capture *and* every settlement attempt,
-retry and dead-letter that came from it, because the correlation id is stored on the
-outbox row rather than living only in the request thread.
+retry and dead-letter that came from it, because the correlation id is stored on the outbox
+row rather than living only in the request thread.
+
+To make it public: build a dashboard over those queries, then **Dashboard settings → Public
+dashboard → Enable**. That URL needs no login.
 
 ### Metrics
 

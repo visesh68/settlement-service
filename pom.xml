@@ -22,6 +22,7 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <logstash-logback-encoder.version>8.1</logstash-logback-encoder.version>
+    <loki-logback-appender.version>2.0.0</loki-logback-appender.version>
     <embedded-postgres.version>2.2.2</embedded-postgres.version>
     <embedded-postgres-binaries.version>17.10.0</embedded-postgres-binaries.version>
   </properties>
@@ -69,6 +70,19 @@
       <groupId>net.logstash.logback</groupId>
       <artifactId>logstash-logback-encoder</artifactId>
       <version>${logstash-logback-encoder.version}</version>
+    </dependency>
+
+    <!--
+      Ships logs to Grafana Cloud Loki. Only active under the "loki" Spring
+      profile, so it is inert locally, in tests, and anywhere LOKI_URL is unset.
+      An app-side appender rather than a platform log drain, because Render
+      forwards syslog and Loki ingests HTTP - and because this then works
+      identically on any host.
+    -->
+    <dependency>
+      <groupId>com.github.loki4j</groupId>
+      <artifactId>loki-logback-appender</artifactId>
+      <version>${loki-logback-appender.version}</version>
     </dependency>
 
     <!-- ========== test ========== -->

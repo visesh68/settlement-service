@@ -43,7 +43,80 @@
     </encoder>
   </appender>
 
-  <root level="INFO">
-    <appender-ref ref="JSON"/>
-  </root>
+  <!--
+    Ship the same JSON to Grafana Cloud Loki.
+
+    Active only under the "loki" Spring profile, so an unset LOKI_URL can never
+    half-configure an appender that then fails at startup: no profile, no
+    appender. Enable with SPRING_PROFILES_ACTIVE=loki plus the three LOKI_*
+    variables.
+
+    The message layout is deliberately the same LogstashLayout as stdout, so a
+    Grafana query can `| json` the line and get correlation_id, payment_id and
+    settlement_key as real fields rather than having to regex them out of a
+    formatted string.
+
+    Labels are kept to a tiny, low-cardinality set. Loki indexes labels, so
+    putting payment_id or correlation_id in there would create a stream per
+    payment and fall over; those belong in the log line, which is exactly where
+    the JSON layout puts them.
+  -->
+  <springProfile name="loki">
+    <appender name="LOKI" class="com.github.loki4j.logback.Loki4jAppender">
+      <http>
+        <url>${LOKI_URL}</url>
+        <auth>
+          <username>${LOKI_USERNAME}</username>
+          <password>${LOKI_PASSWORD}</password>
+        </auth>
+        <useProtobufApi>false</useProtobufApi>
+        <requestTimeoutMs>15000</requestTimeoutMs>
+      </http>
+      <labels>
+        service = ${appName}
+        level = %level
+      </labels>
+      <structuredMetadata>off</structuredMetadata>
+      <message class="net.logstash.logback.layout.LogstashLayout">
+        <timeZone>UTC</timeZone>
+        <includeContext>false</includeContext>
+        <customFields>{"service":"${appName}"}</customFields>
+        <fieldNames>
+          <timestamp>ts</timestamp>
+          <version>[ignore]</version>
+          <levelValue>[ignore]</levelValue>
+          <message>msg</message>
+        </fieldNames>
+      </message>
+      <batch>
+        <maxItems>200</maxItems>
+        <timeoutMs>5000</timeoutMs>
+      </batch>
+      <!-- LOKI_VERBOSE=true prints the appender's own diagnostics, which is the
+           only way to see why a push is failing: a log shipper cannot report its
+           own failures through the log pipeline it is failing to reach. -->
+      <verbose>${LOKI_VERBOSE:-false}</verbose>
+    </appender>
+  </springProfile>
+
+  <!--
+    Two profile-scoped roots rather than one root with a conditional
+    appender-ref: logback rejects <springProfile> nested inside <root>, and does
+    so with a warning it then ignores, so the appender silently never attaches.
+
+    stdout is in both: the platform's own log view must never depend on a
+    third-party backend being reachable.
+  -->
+  <springProfile name="!loki">
+    <root level="INFO">
+      <appender-ref ref="JSON"/>
+    </root>
+  </springProfile>
+
+  <springProfile name="loki">
+    <root level="INFO">
+      <appender-ref ref="JSON"/>
+      <appender-ref ref="LOKI"/>
+    </root>
+  </springProfile>
 </configuration>
