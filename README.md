@@ -39,6 +39,26 @@ a downstream that fails 40% of the time — then the metrics dashboard, which re
 `/metrics` directly in the browser. `double-settled` stays at 0 throughout; that is the
 whole point.
 
+### Logs — Grafana Cloud
+
+![Grafana: the retry ladder and a dead-letter, in structured logs](docs/media/logs-grafana.gif)
+
+The deployed instance's logs in Grafana. The retry panel is the one worth watching:
+`event=settlement_retry_scheduled attempt=1 of 10` climbing through `attempt=9`, then
+`event=settlement_dead_lettered attempts=10 of 10` — a settlement exhausting its attempts
+against a downstream pinned to fail, ending up somewhere visible rather than silently
+dropped. The other panel catches boot: Flyway reporting `Current version of schema
+"public": 2`, then Tomcat and the OTLP exporter starting.
+
+### Logs — Better Stack
+
+![Better Stack live tail: structured JSON from the deployed instance](docs/media/logs-betterstack.gif)
+
+The same service tailed live in Better Stack, from deploy through startup to graceful
+shutdown. Every line is the JSON that `logstash-logback-encoder` writes to stdout —
+`logger`, `thread`, `level`, `service` are real fields, not text to be regex'd, which is
+what makes `| json | correlation_id = "…"` work as a query rather than a grep.
+
 ---
 
 ## Architecture
